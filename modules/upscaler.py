@@ -5,9 +5,10 @@ import numpy as np
 from PIL import Image
 import datetime
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
-                              QFileDialog, QProgressBar, QHBoxLayout, 
-                              QSpinBox, QLineEdit, QScrollArea)
+                              QFileDialog, QTabWidget, QHBoxLayout, 
+                              QDoubleSpinBox, QLineEdit, QScrollArea, QListWidget)
 from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QDragEnterEvent, QDropEvent
 import requests
 from modules.logger import setup_logger
 
@@ -81,17 +82,23 @@ class UpscaleWorker(QThread):
     status = Signal(str)
     finished = Signal()
 
-    def __init__(self, input_path, model_path, scale_factor, is_folder=False):
+    def __init__(self, input_paths, model_path, scale_factor):
         super().__init__()
-        self.input_path = input_path
+        self.input_paths = input_paths if isinstance(input_paths, list) else [input_paths]
         self.model_path = model_path
         self.scale_factor = scale_factor
-        self.is_folder = is_folder
         self.is_running = True
         self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.model = None
-        self.tile_size = 512  # Default tile size
-        self.tile_pad = 32    # Default tile padding
+        self.tile_size = 512
+        self.tile_pad = 32
+
+    def print_progress_bar(self, current, total, prefix='Progress:', length=50):
+        filled_length = int(length * current / total)
+        bar = '=' * filled_length + '-' * (length - filled_length)
+        # Move up one line and clear it
+        print('\033[1A\033[K', end='')
+        print(f'{prefix} [{bar}] {current}/{total}')
 
     def load_model(self):
         if self.model is None:
@@ -210,64 +217,37 @@ class UpscaleWorker(QThread):
             return False
 
     def run(self):
-        def print_progress_bar(current, total, prefix='Progress:', length=50):
-            filled_length = int(length * current / total)
-            bar = '=' * filled_length + '-' * (length - filled_length)
-            # Move up one line and clear it
-            print('\033[1A\033[K', end='')
-            print(f'{prefix} [{bar}] {current}/{total}')
-
         try:
             logger.info("Loading model...")
             self.load_model()
             
-            if self.is_folder:
-                image_files = []
-                for file in os.listdir(self.input_path):
-                    file_path = os.path.join(self.input_path, file)
-                    if os.path.isfile(file_path) and file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                        image_files.append(file_path)
+            total_files = len(self.input_paths)
+            processed = 0
+            
+            print('')  # Empty line for progress bar
+            self.print_progress_bar(0, total_files, prefix='Upscaling:')
+            
+            start_time = datetime.datetime.now()
+            
+            for img_path in self.input_paths:
+                if not self.is_running:
+                    logger.info("Process stopped by user")
+                    self.status.emit("Process stopped by user")
+                    break
                 
-                total_files = len(image_files)
-                logger.info(f"Found {total_files} images to process")
-                processed = 0
-                
-                # Print initial progress bar
-                print('')  # Empty line for progress bar
-                print_progress_bar(0, total_files, prefix='Upscaling:')
-                
-                start_time = datetime.datetime.now()
-                
-                for img_path in image_files:
-                    if not self.is_running:
-                        logger.info("Process stopped by user")
-                        self.status.emit("Process stopped by user")
-                        break
-                    
-                    logger.info(f"Processing: {os.path.basename(img_path)}")
-                    if self.process_image(img_path):
-                        processed += 1
-                        print_progress_bar(processed, total_files, prefix='Upscaling:')
-                
-                end_time = datetime.datetime.now()
-                duration = end_time - start_time
-                
-                print()  # New line after progress bar
-                finish_msg = f"Finished processing {processed} images in {duration.total_seconds():.1f} seconds"
-                logger.info(finish_msg)
-                self.status.emit(finish_msg)
-                
-            else:
-                logger.info(f"Processing single image: {os.path.basename(self.input_path)}")
-                start_time = datetime.datetime.now()
-                
-                if self.process_image(self.input_path):
-                    end_time = datetime.datetime.now()
-                    duration = end_time - start_time
-                    finish_msg = f"Finished processing image in {duration.total_seconds():.1f} seconds"
-                    logger.info(finish_msg)
-                    self.status.emit(finish_msg)
-                
+                logger.info(f"Processing: {os.path.basename(img_path)}")
+                if self.process_image(img_path):
+                    processed += 1
+                    self.print_progress_bar(processed, total_files, prefix='Upscaling:')
+            
+            end_time = datetime.datetime.now()
+            duration = end_time - start_time
+            
+            print()  # New line after progress bar
+            finish_msg = f"Finished processing {processed} images in {duration.total_seconds():.1f} seconds"
+            logger.info(finish_msg)
+            self.status.emit(finish_msg)
+            
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             logger.error(error_msg)
@@ -277,6 +257,304 @@ class UpscaleWorker(QThread):
 
     def stop(self):
         self.is_running = False
+
+    def clear_gpu_memory(self):
+        if self.model is not None:
+            del self.model
+            self.model = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+class DragDropMixin:
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+class SingleImageTab(QWidget):
+    def __init__(self, parent):
+        super().__init__()
+        self.parent = parent
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+        
+        # Input selection
+        input_layout = QHBoxLayout()
+        self.input_path = QLineEdit()
+        self.input_path.setPlaceholderText("Select an image file or drag & drop anywhere")
+        self.browse_btn = QPushButton("Browse")
+        input_layout.addWidget(self.input_path)
+        input_layout.addWidget(self.browse_btn)
+        
+        self.browse_btn.clicked.connect(self.browse_file)
+        self.input_path.textChanged.connect(lambda: self.parent.check_input(self.input_path.text()))
+        
+        layout.addLayout(input_layout)
+        layout.addStretch()
+        self.setLayout(layout)
+
+    def browse_file(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Image",
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp)"
+        )
+        if path:
+            self.input_path.setText(path)
+
+    def get_input_paths(self):
+        path = self.input_path.text().strip()
+        return [path] if path else []
+
+    def handle_dropped_files(self, files):
+        if files:
+            self.input_path.setText(files[0])  # Take only the first file for single image tab
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            urls = event.mimeData().urls()
+            if len(urls) == 1:  # Only accept one file for single image tab
+                path = urls[0].toLocalFile()
+                if os.path.isfile(path) and path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+                    event.accept()
+                    self.drop_label.setStyleSheet("""
+                        QLabel {
+                            border: 2px dashed #4CAF50;
+                            border-radius: 5px;
+                            padding: 20px;
+                            background: #E8F5E9;
+                        }
+                    """)
+                    return
+        event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.drop_label.setStyleSheet("""
+            QLabel {
+                border: 2px dashed #aaa;
+                border-radius: 5px;
+                padding: 20px;
+                background: #f0f0f0;
+            }
+        """)
+
+    def dropEvent(self, event: QDropEvent):
+        if event.mimeData().hasUrls():
+            url = event.mimeData().urls()[0]
+            path = url.toLocalFile()
+            if os.path.isfile(path) and path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+                self.input_path.setText(path)
+                event.accept()
+        
+        self.drop_label.setStyleSheet("""
+            QLabel {
+                border: 2px dashed #aaa;
+                border-radius: 5px;
+                padding: 20px;
+                background: #f0f0f0;
+            }
+        """)
+
+class MultipleImagesTab(QWidget):
+    def __init__(self, parent):
+        super().__init__()
+        self.parent = parent
+        self.init_ui()
+        self.selected_paths = []
+        self.is_folder = False
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+        
+        # Directory input layout
+        dir_layout = QHBoxLayout()
+        self.dir_input = QLineEdit()
+        self.dir_input.setPlaceholderText("Enter directory path or drag & drop anywhere")
+        self.dir_input.textChanged.connect(self.handle_dir_input)
+        dir_layout.addWidget(self.dir_input)
+        
+        # Buttons layout
+        button_layout = QHBoxLayout()
+        self.browse_files_btn = QPushButton("Select Files")
+        self.browse_folder_btn = QPushButton("Select Folder")
+        button_layout.addWidget(self.browse_files_btn)
+        button_layout.addWidget(self.browse_folder_btn)
+        
+        # Selected files info
+        self.info_label = QLabel("No files selected")
+        self.info_label.setAlignment(Qt.AlignCenter)
+        
+        # File list widget
+        self.file_list = QListWidget()
+        self.file_list.setMinimumHeight(200)
+        self.file_list.setStyleSheet("""
+            QListWidget {
+                border: 1px solid #aaa;
+                border-radius: 4px;
+                background-color: #ffffff;
+                padding: 5px;
+            }
+            QListWidget::item {
+                padding: 5px;
+                border-bottom: 1px solid #eee;
+            }
+            QListWidget::item:selected {
+                background-color: #e0e0e0;
+                color: black;
+            }
+            QListWidget::item:hover {
+                background-color: #f0f0f0;
+            }
+        """)
+        
+        # Connect buttons
+        self.browse_files_btn.clicked.connect(self.browse_files)
+        self.browse_folder_btn.clicked.connect(self.browse_folder)
+        
+        # Add widgets to layout
+        layout.addLayout(dir_layout)
+        layout.addLayout(button_layout)
+        layout.addWidget(self.info_label)
+        layout.addWidget(self.file_list)
+        
+        self.setLayout(layout)
+
+    def handle_dir_input(self):
+        path = self.dir_input.text().strip()
+        if os.path.exists(path):
+            if os.path.isfile(path) and path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+                self.selected_paths = [path]
+                self.is_folder = False
+                self.update_file_list()
+                self.parent.check_input(path)
+            elif os.path.isdir(path):
+                self.process_directory(path)
+
+    def process_directory(self, directory):
+        files = []
+        # Only process files in the root directory, not in subfolders
+        for filename in os.listdir(directory):
+            file_path = os.path.join(directory, filename)
+            if os.path.isfile(file_path) and filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+                files.append(file_path)
+        
+        if files:
+            self.selected_paths = files
+            self.is_folder = True
+            self.update_file_list()
+            self.parent.check_input(files[0])
+
+    def update_file_list(self):
+        self.file_list.clear()
+        for path in self.selected_paths:
+            item_text = f"{os.path.basename(path)} ({os.path.dirname(path)})"
+            self.file_list.addItem(item_text)
+        self.info_label.setText(f"{len(self.selected_paths)} files selected")
+
+    def handle_dropped_files(self, files):
+        if files:
+            if len(files) == 1 and os.path.isdir(files[0]):
+                self.dir_input.setText(files[0])
+            self.selected_paths = files
+            self.update_file_list()
+            self.parent.check_input(files[0])
+
+    def browse_files(self):
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "Select Images",
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp)"
+        )
+        if files:
+            self.selected_paths = files
+            self.is_folder = False
+            self.update_file_list()
+            self.parent.check_input(files[0])
+
+    def browse_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder")
+        if folder:
+            self.dir_input.setText(folder)
+            self.process_directory(folder)
+
+    def get_input_paths(self):
+        return self.selected_paths
+
+    def dragEnterEvent(self, event: QDragEnterEvent):
+        if event.mimeData().hasUrls():
+            event.accept()
+            self.drop_label.setStyleSheet("""
+                QLabel {
+                    border: 2px dashed #4CAF50;
+                    border-radius: 5px;
+                    padding: 20px;
+                    background: #E8F5E9;
+                }
+            """)
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.accept()
+        else:
+            event.ignore()
+
+    def dragLeaveEvent(self, event):
+        self.drop_label.setStyleSheet("""
+            QLabel {
+                border: 2px dashed #aaa;
+                border-radius: 5px;
+                padding: 20px;
+                background: #f0f0f0;
+            }
+        """)
+
+    def dropEvent(self, event: QDropEvent):
+        files = []
+        for url in event.mimeData().urls():
+            path = url.toLocalFile()
+            if os.path.isfile(path) and path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+                files.append(path)
+            elif os.path.isdir(path):
+                # If it's a folder, set it in the directory input
+                self.dir_input.setText(path)
+                # Process directory will handle adding the files (root folder only)
+                self.process_directory(path)
+                event.accept()
+                return
+        
+        if files:
+            self.selected_paths = files
+            self.update_file_list()
+            self.parent.check_input(files[0])
+            event.accept()
+        
+        self.drop_label.setStyleSheet("""
+            QLabel {
+                border: 2px dashed #aaa;
+                border-radius: 5px;
+                padding: 20px;
+                background: #f0f0f0;
+            }
+        """)
 
 class UpscalerTab(QWidget):
     def __init__(self):
@@ -288,20 +566,22 @@ class UpscalerTab(QWidget):
     def init_ui(self):
         layout = QVBoxLayout()
 
-        # Input selection
-        input_layout = QHBoxLayout()
-        self.input_path = QLineEdit()
-        self.input_path.setPlaceholderText("Enter path to image or folder")
-        self.browse_btn = QPushButton("Browse")
-        input_layout.addWidget(self.input_path)
-        input_layout.addWidget(self.browse_btn)
+        # Create sub-tabs
+        self.tabs = QTabWidget()
+        self.single_tab = SingleImageTab(self)
+        self.multiple_tab = MultipleImagesTab(self)
+        
+        self.tabs.addTab(self.single_tab, "Single Image")
+        self.tabs.addTab(self.multiple_tab, "Multiple Images")
 
         # Scale selection
         scale_layout = QHBoxLayout()
         scale_layout.addWidget(QLabel("Scale factor:"))
-        self.scale_spin = QSpinBox()
-        self.scale_spin.setRange(2, 16)  # Allow scaling from 2x to 16x
-        self.scale_spin.setValue(4)  # Default to 4x
+        self.scale_spin = QDoubleSpinBox()  # Change to QDoubleSpinBox
+        self.scale_spin.setRange(0.1, 16.0)  # Allow values from 0.1 to 16.0
+        self.scale_spin.setValue(4.0)  # Default to 4.0
+        self.scale_spin.setSingleStep(0.1)  # Set step to 0.1
+        self.scale_spin.setDecimals(1)  # Show one decimal place
         self.scale_spin.setSuffix('x')
         scale_layout.addWidget(self.scale_spin)
         scale_layout.addStretch()
@@ -331,19 +611,17 @@ class UpscalerTab(QWidget):
         self.status_area.setWidget(self.status_text)
         self.status_area.setMinimumHeight(200)
 
-        # Add scale layout to main layout
-        layout.addLayout(input_layout)
-        layout.addLayout(scale_layout)  # Add the scale selection
+        # Add all layouts
+        layout.addWidget(self.tabs)
+        layout.addLayout(scale_layout)
         layout.addLayout(model_layout)
         layout.addLayout(button_layout)
         layout.addWidget(self.status_area)
 
         # Connect signals
-        self.browse_btn.clicked.connect(self.browse_input)
         self.download_btn.clicked.connect(self.download_model)
         self.start_btn.clicked.connect(self.start_upscale)
         self.stop_btn.clicked.connect(self.stop_upscale)
-        self.input_path.textChanged.connect(self.check_input)
 
         self.setLayout(layout)
         
@@ -351,18 +629,27 @@ class UpscalerTab(QWidget):
         self.check_model()
 
     def check_model(self):
-        # Create models directory in the same directory as the script
+        # Get project root directory (two levels up from the module file)
+        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        model_dir = os.path.join(root_dir, "models")
         model_filename = "RealESRGAN_x4plus_anime_6B.pth"
-        model_dir = os.path.join(os.path.dirname(__file__), "models")
         self.model_path = os.path.join(model_dir, model_filename)
         
         if os.path.exists(self.model_path):
             self.model_status.setText("Model ready")
             self.download_btn.setEnabled(False)
-            self.check_input(self.input_path.text())
+            self.check_input("")  # Initialize with empty string
         else:
             self.model_status.setText("Model not downloaded")
             self.download_btn.setEnabled(True)
+            self.start_btn.setEnabled(False)
+
+    def check_input(self, path):
+        if os.path.exists(self.model_path):
+            current_tab = self.tabs.currentWidget()
+            input_paths = current_tab.get_input_paths()
+            self.start_btn.setEnabled(len(input_paths) > 0)
+        else:
             self.start_btn.setEnabled(False)
 
     def download_model(self):
@@ -371,7 +658,8 @@ class UpscalerTab(QWidget):
         
         try:
             url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth"
-            model_dir = os.path.join(os.path.dirname(__file__), "models")
+            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            model_dir = os.path.join(root_dir, "models")
             os.makedirs(model_dir, exist_ok=True)
             
             response = requests.get(url, stream=True)
@@ -383,54 +671,47 @@ class UpscalerTab(QWidget):
                         f.write(chunk)
             
             self.model_status.setText("Model ready")
-            self.check_input(self.input_path.text())
+            self.check_input("")
             
         except Exception as e:
             self.model_status.setText(f"Download failed: {str(e)}")
             self.download_btn.setEnabled(True)
 
-    def browse_input(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Image",
-            "",
-            "Images (*.png *.jpg *.jpeg *.bmp)"
-        )
-        if path:
-            self.input_path.setText(path)
-
-    def check_input(self, path):
-        path = path.strip()
-        if os.path.exists(path) and os.path.exists(self.model_path):
-            self.start_btn.setEnabled(True)
-        else:
-            self.start_btn.setEnabled(False)
-
     def start_upscale(self):
         if self.worker is not None and self.worker.isRunning():
             return
 
-        input_path = self.input_path.text().strip()
-        is_folder = os.path.isdir(input_path)
+        current_tab = self.tabs.currentWidget()
+        input_paths = current_tab.get_input_paths()
+        
+        if not input_paths:
+            self.update_status("No input files selected")
+            return
+
         scale_factor = self.scale_spin.value()
 
         self.worker = UpscaleWorker(
-            input_path, 
+            input_paths, 
             self.model_path, 
-            scale_factor,
-            is_folder
+            scale_factor
         )
         self.worker.status.connect(self.update_status)
         self.worker.finished.connect(self.upscale_finished)
 
+        # Disable UI controls
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self.browse_btn.setEnabled(False)
-        self.input_path.setEnabled(False)
-        self.scale_spin.setEnabled(False)  # Disable scale selection during processing
+        self.tabs.setEnabled(False)
+        self.scale_spin.setEnabled(False)
         self.status_text.setText("")
         
         self.worker.start()
+
+    def stop_upscale(self):
+        if self.worker and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait()
+            self.upscale_finished()
 
     def upscale_finished(self):
         self.start_btn.setEnabled(True)
@@ -448,10 +729,8 @@ class UpscalerTab(QWidget):
 
     def update_status(self, text):
         if "Finished" in text:
-            # Add some styling to the finish message
             formatted_text = f"<p style='color: green; font-weight: bold;'>{text}</p>"
         elif "Error" in text:
-            # Add styling to error messages
             formatted_text = f"<p style='color: red; font-weight: bold;'>{text}</p>"
         else:
             formatted_text = f"<p>{text}</p>"
@@ -462,5 +741,12 @@ class UpscalerTab(QWidget):
     def upscale_finished(self):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.browse_btn.setEnabled(True)
-        self.input_path.setEnabled(True)
+        self.tabs.setEnabled(True)
+        self.scale_spin.setEnabled(True)
+
+    def stop_upscale(self):
+        if self.worker and self.worker.isRunning():
+            self.worker.stop()
+            self.worker.wait()
+            self.worker.clear_gpu_memory()  # Now this method exists
+            self.upscale_finished()

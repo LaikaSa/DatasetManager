@@ -5,3 +5,8 @@ opencv-python==4.8.0.76
 imagehash==4.3.1
 requests==2.31.0
 Send2Trash==1.8.2
+pandas
+huggingface_hub
+onnx==1.16.1
+onnxruntime-gpu==1.17.1
+colorama

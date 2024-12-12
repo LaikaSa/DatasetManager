@@ -1,0 +1,16 @@
+{
+    "file_types": {
+        "jpg": false,
+        "png": true,
+        "gif": false,
+        "webm": false,
+        "mp4": false
+    },
+    "size_filters": {
+        "enabled": true,
+        "min_size": 0,
+        "min_unit": "KB",
+        "max_size": 50,
+        "max_unit": "MB"
+    }
+}

@@ -10,3 +10,4 @@ huggingface_hub
 onnx==1.16.1
 onnxruntime-gpu==1.17.1
 colorama
+tqdm

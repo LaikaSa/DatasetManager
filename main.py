@@ -7,6 +7,7 @@ from modules.image_resizer import ImageResizerTab
 from modules.upscaler import UpscalerTab
 from modules.logger import setup_logger
 from modules.caption_generator import CaptionGeneratorTab
+from modules.tag_editor import TagEditorTab
 import os  # Add this for path operations
 logger = setup_logger()
 
@@ -15,7 +16,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         logger.info("Initializing main application")
         self.setWindowTitle("Image Processing Tool")
-        self.setMinimumSize(800, 600)
+        self.setMinimumSize(1000, 600)
         self.setAcceptDrops(True)  # Enable drop for main window
 
         # Create tab widget
@@ -27,12 +28,14 @@ class MainWindow(QMainWindow):
         self.resizer_tab = ImageResizerTab()
         self.upscaler_tab = UpscalerTab()
         self.caption_tab = CaptionGeneratorTab()
+        self.tag_editor_tab = TagEditorTab()
 
         # Add tabs
         self.tabs.addTab(self.duplicate_tab, "Duplicate Detection")
         self.tabs.addTab(self.resizer_tab, "Image Resizer")
         self.tabs.addTab(self.upscaler_tab, "Upscaler")
         self.tabs.addTab(self.caption_tab, "Caption Generator")
+        self.tabs.addTab(self.tag_editor_tab, "Tags Editor")
         
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():

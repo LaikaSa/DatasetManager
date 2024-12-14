@@ -6,7 +6,7 @@ from PySide6.QtGui import QPixmap
 class MaximizedImage(QWidget):
     def __init__(self, scroll_area, parent=None):
         super().__init__(parent)
-        self.scroll_area = scroll_area  # Store reference to scroll area
+        self.scroll_area = scroll_area
         self.layout = QVBoxLayout(self)
         self.layout.setContentsMargins(10, 10, 10, 10)
         
@@ -43,13 +43,17 @@ class MaximizedImage(QWidget):
         self.layout.addWidget(self.image_label, 1)
         self.layout.addStretch()
 
+        self.current_image_path = None
+        self.original_pixmap = None
+
     def set_image(self, image_path):
+        self.current_image_path = image_path
+        # Load full image
         self.original_pixmap = QPixmap(image_path)
         self.resize_image()
 
     def resize_image(self):
-        if hasattr(self, 'original_pixmap'):
-            # Get the available space from the scroll area
+        if self.original_pixmap:
             viewport_size = self.scroll_area.viewport().size()
             available_width = viewport_size.width() - 40
             available_height = viewport_size.height() - 40
@@ -63,6 +67,17 @@ class MaximizedImage(QWidget):
             
             self.image_label.setPixmap(scaled_pixmap)
             self.setFixedSize(viewport_size)
+
+    def clear_image(self):
+        """Clear the full-size image data"""
+        self.image_label.clear()
+        self.original_pixmap = None
+        self.current_image_path = None
+
+    def hide(self):
+        """Clear image data when hiding"""
+        self.clear_image()
+        super().hide()
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -109,6 +124,8 @@ class GalleryGrid(QScrollArea):
         self.verticalScrollBar().setValue(0)
 
     def return_to_grid(self):
+        """Return to grid view and clear full-size image"""
+        self.maximized_image.clear_image()  # Clear the full-size image
         self.main_layout.setCurrentWidget(self.grid_container)
         self.do_refresh()
 

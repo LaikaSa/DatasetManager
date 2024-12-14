@@ -1,13 +1,13 @@
 from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, 
                               QLineEdit, QCheckBox, QGridLayout,
                               QPushButton, QHBoxLayout, QButtonGroup,
-                              QLabel)
+                              QLabel, QFrame)
 from PySide6.QtCore import Signal, Qt
 from collections import Counter
 
-class TagPanel(QScrollArea):
+class TagPanel(QWidget):  # Changed from QScrollArea to QWidget
     tag_toggled = Signal(str, bool)
-    logic_changed = Signal(str, str)  # (AND/OR, POSITIVE/NEGATIVE)
+    logic_changed = Signal(str, str)
 
     def __init__(self):
         super().__init__()
@@ -16,20 +16,24 @@ class TagPanel(QScrollArea):
         self.init_ui()
 
     def init_ui(self):
-        self.setWidgetResizable(True)
-        self.container = QWidget()
-        self.layout = QVBoxLayout(self.container)
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(10)
+        
+        # Top controls container (fixed position)
+        controls_container = QWidget()
+        controls_layout = QVBoxLayout(controls_container)
+        controls_layout.setSpacing(10)
         
         # Search box
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Search tags...")
         self.search_box.textChanged.connect(self.filter_tags)
-        self.layout.addWidget(self.search_box)
+        controls_layout.addWidget(self.search_box)
         
         # Clear filter button
         self.clear_button = QPushButton("Clear Filters")
         self.clear_button.clicked.connect(self.clear_filters)
-        self.layout.addWidget(self.clear_button)
+        controls_layout.addWidget(self.clear_button)
         
         # Logic selection groups
         # AND/OR logic
@@ -46,7 +50,7 @@ class TagPanel(QScrollArea):
         self.combine_logic_group.addButton(self.or_logic)
         combine_logic_layout.addWidget(self.or_logic)
         
-        self.layout.addLayout(combine_logic_layout)
+        controls_layout.addLayout(combine_logic_layout)
 
         # POSITIVE/NEGATIVE logic
         filter_logic_layout = QHBoxLayout()
@@ -62,24 +66,40 @@ class TagPanel(QScrollArea):
         self.filter_logic_group.addButton(self.negative_logic)
         filter_logic_layout.addWidget(self.negative_logic)
         
-        self.layout.addLayout(filter_logic_layout)
+        controls_layout.addLayout(filter_logic_layout)
 
         # Image counter
         self.image_counter = QLabel("Showing: 0 images")
-        self.layout.addWidget(self.image_counter)
+        controls_layout.addWidget(self.image_counter)
+
+        # Add separator line
+        separator = QFrame()
+        separator.setFrameShape(QFrame.HLine)
+        separator.setFrameShadow(QFrame.Sunken)
+        
+        # Add controls container to main layout
+        main_layout.addWidget(controls_container)
+        main_layout.addWidget(separator)
+
+        # Create scrollable area for tags
+        tags_scroll = QScrollArea()
+        tags_scroll.setWidgetResizable(True)
+        tags_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        
+        # Tags container
+        self.tags_widget = QWidget()
+        self.tags_layout = QGridLayout(self.tags_widget)
+        self.tags_layout.setSpacing(5)
+        tags_scroll.setWidget(self.tags_widget)
+        
+        # Add scrollable tags area to main layout
+        main_layout.addWidget(tags_scroll)
         
         # Connect logic changes
         self.and_logic.toggled.connect(self.on_logic_changed)
         self.or_logic.toggled.connect(self.on_logic_changed)
         self.positive_logic.toggled.connect(self.on_logic_changed)
         self.negative_logic.toggled.connect(self.on_logic_changed)
-        
-        # Tags container
-        self.tags_widget = QWidget()
-        self.tags_layout = QGridLayout(self.tags_widget)
-        self.tags_layout.setSpacing(5)
-        self.layout.addWidget(self.tags_widget)
-        self.setWidget(self.container)
 
     def update_image_counter(self, count, total):
         """Update the image counter display"""

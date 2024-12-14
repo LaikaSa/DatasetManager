@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (QScrollArea, QWidget, QVBoxLayout, 
-                              QLineEdit, QCheckBox, QGridLayout)
+                              QLineEdit, QCheckBox, QGridLayout,QPushButton)
 from PySide6.QtCore import Signal, Qt
 from collections import Counter
 
@@ -9,6 +9,7 @@ class TagPanel(QScrollArea):
     def __init__(self):
         super().__init__()
         self.tag_checkboxes = {}
+        self.COLUMNS = 3
         self.init_ui()
 
     def init_ui(self):
@@ -22,23 +23,28 @@ class TagPanel(QScrollArea):
         self.search_box.textChanged.connect(self.filter_tags)
         self.layout.addWidget(self.search_box)
         
+        # Clear filter button
+        self.clear_button = QPushButton("Clear Filters")
+        self.clear_button.clicked.connect(self.clear_filters)
+        self.layout.addWidget(self.clear_button)
+        
         # Tags container
         self.tags_widget = QWidget()
         self.tags_layout = QGridLayout(self.tags_widget)
-        self.tags_layout.setSpacing(5)  # Space between checkboxes
+        self.tags_layout.setSpacing(5)
         self.layout.addWidget(self.tags_widget)
         self.setWidget(self.container)
+
+    def clear_filters(self):
+        """Uncheck all tag checkboxes"""
+        for checkbox in self.tag_checkboxes.values():
+            checkbox.setChecked(False)
 
     def update_tags(self, tag_counts):
         # Clear existing tags
         while self.tags_layout.count():
             self.tags_layout.takeAt(0).widget().deleteLater()
         self.tag_checkboxes.clear()
-
-        # Calculate number of columns based on panel width
-        panel_width = self.viewport().width()
-        avg_checkbox_width = 150  # Estimated average width for a checkbox
-        columns = max(1, panel_width // avg_checkbox_width)
 
         # Add new tags in frequency order
         sorted_tags = sorted(tag_counts.items(), key=lambda x: (-x[1], x[0]))
@@ -47,19 +53,15 @@ class TagPanel(QScrollArea):
             checkbox.stateChanged.connect(lambda state, t=tag: 
                 self.tag_toggled.emit(t, state == Qt.CheckState.Checked.value))
             
-            # Calculate row and column positions
-            row = idx // columns
-            col = idx % columns
+            # Calculate row and column positions with fixed 3 columns
+            row = idx // self.COLUMNS
+            col = idx % self.COLUMNS
             
             self.tags_layout.addWidget(checkbox, row, col)
             self.tag_checkboxes[tag] = checkbox
 
     def filter_tags(self, text):
         visible_count = 0
-        panel_width = self.viewport().width()
-        avg_checkbox_width = 150
-        columns = max(1, panel_width // avg_checkbox_width)
-        
         search_terms = text.lower().split(',')
         
         # First, determine visibility
@@ -74,8 +76,8 @@ class TagPanel(QScrollArea):
 
         # Then, reposition visible checkboxes
         for idx, checkbox in enumerate(visible_checkboxes):
-            row = idx // columns
-            col = idx % columns
+            row = idx // self.COLUMNS
+            col = idx % self.COLUMNS
             # Need to remove and re-add to reposition
             self.tags_layout.removeWidget(checkbox)
             self.tags_layout.addWidget(checkbox, row, col)
@@ -84,12 +86,9 @@ class TagPanel(QScrollArea):
         super().resizeEvent(event)
         # Reflow tags when panel is resized
         visible_checkboxes = [cb for cb in self.tag_checkboxes.values() if cb.isVisible()]
-        panel_width = self.viewport().width()
-        avg_checkbox_width = 150
-        columns = max(1, panel_width // avg_checkbox_width)
         
         for idx, checkbox in enumerate(visible_checkboxes):
-            row = idx // columns
-            col = idx % columns
+            row = idx // self.COLUMNS
+            col = idx % self.COLUMNS
             self.tags_layout.removeWidget(checkbox)
             self.tags_layout.addWidget(checkbox, row, col)

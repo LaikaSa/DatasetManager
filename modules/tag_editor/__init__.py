@@ -85,13 +85,19 @@ class TagEditorTab(QWidget):
         self.update_gallery()
 
     def update_gallery(self):
+        """Update gallery with filtered images"""
         if not self.selected_tags:
             visible_thumbnails = self.images
         else:
+            # Convert selected tags to set once for comparison
+            required_tags = {tag.lower() for tag in self.selected_tags}
+            # Filter images
             visible_thumbnails = [
                 thumb for thumb in self.images
-                if self.selected_tags.issubset(thumb.tags)
+                if thumb.has_all_tags(required_tags)
             ]
+        
+        # Update gallery with filtered thumbnails
         self.gallery.display_images(visible_thumbnails)
 
     def resizeEvent(self, event):

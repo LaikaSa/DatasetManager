@@ -106,16 +106,21 @@ class TagPanel(QScrollArea):
         # Add new tags in frequency order
         sorted_tags = sorted(tag_counts.items(), key=lambda x: (-x[1], x[0]))
         for idx, (tag, count) in enumerate(sorted_tags):
-            checkbox = QCheckBox(f"{tag} ({count})")
-            checkbox.stateChanged.connect(lambda state, t=tag: 
-                self.tag_toggled.emit(t, state == Qt.CheckState.Checked.value))
+            tag_text = tag.strip()  # Clean the tag
+            checkbox = QCheckBox(f"{tag_text} ({count})")
+            
+            # Use a lambda with default argument to capture the correct tag
+            checkbox.stateChanged.connect(
+                lambda state, t=tag_text: 
+                self.tag_toggled.emit(t, state == Qt.CheckState.Checked.value)
+            )
             
             # Calculate row and column positions with fixed 3 columns
             row = idx // self.COLUMNS
             col = idx % self.COLUMNS
             
             self.tags_layout.addWidget(checkbox, row, col)
-            self.tag_checkboxes[tag] = checkbox
+            self.tag_checkboxes[tag_text] = checkbox
 
     def filter_tags(self, text):
         visible_count = 0

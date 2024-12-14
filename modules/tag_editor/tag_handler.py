@@ -3,7 +3,9 @@ from collections import Counter
 def load_tags(tag_path):
     try:
         with open(tag_path, 'r', encoding='utf-8') as f:
-            return f.read().strip()
+            tags = f.read().strip()
+            # Clean tags when loading
+            return ','.join(tag.strip() for tag in tags.split(',') if tag.strip())
     except:
         return ''
 

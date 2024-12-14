@@ -101,8 +101,11 @@ class TagEditorTab(QWidget):
         """Update gallery with filtered images"""
         if not self.selected_tags:
             visible_thumbnails = self.images
+            print(f"No tags selected, showing all {len(self.images)} images")
         else:
             required_tags = {tag.lower() for tag in self.selected_tags}
+            print(f"Filtering with tags: {required_tags}")
+            print(f"Using logic: {self.combine_logic} and {self.filter_logic}")
             
             # First apply AND/OR logic
             if self.combine_logic == "AND":
@@ -110,11 +113,13 @@ class TagEditorTab(QWidget):
                     thumb for thumb in self.images
                     if thumb.has_all_tags(required_tags)
                 ]
+                print(f"AND logic found {len(matching_thumbnails)} matches")
             else:  # OR logic
                 matching_thumbnails = [
                     thumb for thumb in self.images
                     if thumb.has_any_tags(required_tags)
                 ]
+                print(f"OR logic found {len(matching_thumbnails)} matches")
             
             # Then apply POSITIVE/NEGATIVE logic
             if self.filter_logic == "POSITIVE":
@@ -124,6 +129,8 @@ class TagEditorTab(QWidget):
                     thumb for thumb in self.images
                     if thumb not in matching_thumbnails
                 ]
+            
+            print(f"Final visible count: {len(visible_thumbnails)}")
         
         # Update gallery and counter
         self.gallery.display_images(visible_thumbnails)

@@ -12,6 +12,8 @@ class TagEditorTab(QWidget):
         super().__init__()
         self.images = []
         self.selected_tags = set()
+        self.combine_logic = "AND"  # AND/OR
+        self.filter_logic = "POSITIVE"  # POSITIVE/NEGATIVE
         self.init_ui()
 
     def init_ui(self):
@@ -51,6 +53,9 @@ class TagEditorTab(QWidget):
         
         layout.addLayout(split_layout)
 
+        # Connect the new logic signal
+        self.tag_panel.logic_changed.connect(self.on_logic_changed)
+
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Folder")
         if folder:
@@ -68,14 +73,16 @@ class TagEditorTab(QWidget):
         tag_counts = tag_handler.count_tags(tags_list)
         self.tag_panel.update_tags(tag_counts)
         
-        # Display images
+        # Display images and update counter
         self.update_gallery()
+        self.tag_panel.update_image_counter(len(self.images), len(self.images))
 
     def unload_folder(self):
         self.images = []
         self.selected_tags.clear()
         self.update_gallery()
         self.tag_panel.update_tags({})
+        self.tag_panel.update_image_counter(0, 0)
 
     def on_tag_toggled(self, tag, checked):
         if checked:
@@ -84,21 +91,43 @@ class TagEditorTab(QWidget):
             self.selected_tags.discard(tag.lower())
         self.update_gallery()
 
+    def on_logic_changed(self, combine_logic, filter_logic):
+        """Handle change in tag logic"""
+        self.combine_logic = combine_logic
+        self.filter_logic = filter_logic
+        self.update_gallery()
+
     def update_gallery(self):
         """Update gallery with filtered images"""
         if not self.selected_tags:
             visible_thumbnails = self.images
         else:
-            # Convert selected tags to set once for comparison
             required_tags = {tag.lower() for tag in self.selected_tags}
-            # Filter images
-            visible_thumbnails = [
-                thumb for thumb in self.images
-                if thumb.has_all_tags(required_tags)
-            ]
+            
+            # First apply AND/OR logic
+            if self.combine_logic == "AND":
+                matching_thumbnails = [
+                    thumb for thumb in self.images
+                    if thumb.has_all_tags(required_tags)
+                ]
+            else:  # OR logic
+                matching_thumbnails = [
+                    thumb for thumb in self.images
+                    if thumb.has_any_tags(required_tags)
+                ]
+            
+            # Then apply POSITIVE/NEGATIVE logic
+            if self.filter_logic == "POSITIVE":
+                visible_thumbnails = matching_thumbnails
+            else:  # NEGATIVE logic
+                visible_thumbnails = [
+                    thumb for thumb in self.images
+                    if thumb not in matching_thumbnails
+                ]
         
-        # Update gallery with filtered thumbnails
+        # Update gallery and counter
         self.gallery.display_images(visible_thumbnails)
+        self.tag_panel.update_image_counter(len(visible_thumbnails), len(self.images))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

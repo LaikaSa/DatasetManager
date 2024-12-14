@@ -23,5 +23,9 @@ class ImageThumbnail(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
     def has_all_tags(self, required_tags):
-        """Efficiently check if thumbnail has all required tags"""
+        """Check if thumbnail has ALL required tags (AND logic)"""
         return required_tags.issubset(self.tags)
+
+    def has_any_tags(self, required_tags):
+        """Check if thumbnail has ANY of the required tags (OR logic)"""
+        return bool(required_tags & self.tags)  # Return True if there's any intersection

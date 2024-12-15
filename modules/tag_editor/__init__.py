@@ -3,15 +3,13 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
 from PySide6.QtCore import Qt
 from .gallery_view import GalleryView
 from .tag_panel import TagPanel
-from .image_model import ImageModel
+from .data_model import DataModel
 import os
 
 class TagEditorTab(QWidget):
     def __init__(self):
         super().__init__()
-        self.image_model = ImageModel()
-        self.pending_changes = []
-        self.tags_to_remove = set()  # Track tags pending removal
+        self.data_model = DataModel()
         self.init_ui()
 
     def init_ui(self):
@@ -21,11 +19,9 @@ class TagEditorTab(QWidget):
         # Top controls
         top_layout = QHBoxLayout()
         
-        # Path input
+        # Path input and buttons
         self.path_input = QLineEdit()
         self.path_input.setPlaceholderText("Enter folder path...")
-        
-        # Buttons
         self.browse_btn = QPushButton("Browse")
         self.load_btn = QPushButton("Load")
         self.unload_btn = QPushButton("Unload")
@@ -43,7 +39,7 @@ class TagEditorTab(QWidget):
         # Split view
         split_layout = QHBoxLayout()
         
-        # Gallery view
+        # Gallery
         self.gallery = GalleryView()
         split_layout.addWidget(self.gallery, 1)
         
@@ -58,8 +54,19 @@ class TagEditorTab(QWidget):
         self.load_btn.clicked.connect(self.load_folder)
         self.unload_btn.clicked.connect(self.unload_folder)
         self.save_btn.clicked.connect(self.save_changes)
-        self.tag_panel.filter_changed.connect(self.apply_filters)
-        self.tag_panel.tags_removal_queued.connect(self.queue_tag_removal)
+        self.tag_panel.filter_changed.connect(self.on_filter_changed)
+        self.tag_panel.tags_removal_requested.connect(self.remove_tags)
+
+    def on_filter_changed(self, tags: set, combine_logic: str, filter_logic: str):
+        print(f"TagEditorTab applying filter: {len(tags)} tags")  # Debug print
+        filtered_paths = self.data_model.filter_images(tags, combine_logic, filter_logic)
+        filtered_images = [self.data_model.images[path] for path in filtered_paths]
+        
+        # Update gallery with filtered images
+        self.gallery.display_images(filtered_images)
+        
+        # Update counter
+        self.tag_panel.update_counter(len(filtered_images), len(self.data_model.images))
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Folder")
@@ -69,43 +76,60 @@ class TagEditorTab(QWidget):
     def load_folder(self):
         folder = self.path_input.text()
         if not folder or not os.path.exists(folder):
+            print(f"Invalid folder path: {folder}")
             return
 
-        # Load images and their tags
-        self.image_model.load_directory(folder)
+        print("Starting folder load...")
+        self.data_model.load_directory(folder)
+        print("Directory loaded, updating UI...")
         
         # Update gallery
-        self.gallery.display_images(self.image_model.images)
+        images = list(self.data_model.images.values())
+        print(f"Displaying {len(images)} images...")
+        self.gallery.display_images(images)
         
-        # Update tag panel with tag frequencies
-        tag_counts = self.image_model.get_tag_frequencies()
-        self.tag_panel.update_tags(tag_counts)
+        # Update tag panel
+        print(f"Updating tag panel with {len(self.data_model.tag_frequencies)} tags...")
+        self.tag_panel.update_tags(self.data_model.tag_frequencies)
         
-        # Update counter
-        self.tag_panel.update_counter(len(self.image_model.images), 
-                                    len(self.image_model.images))
+        # Update counter with total images
+        self.tag_panel.update_counter(len(images), len(images))
+        
+        self.save_btn.setEnabled(False)
+        print("Load complete")
 
     def unload_folder(self):
-        self.image_model.clear()
+        self.data_model.clear()
         self.gallery.clear()
-        self.tag_panel.update_tags({})
-        self.tag_panel.update_counter(0, 0)
-        self.tags_to_remove.clear()
-        self.tag_panel.clear_pending_status()
+        self.tag_panel.clear()
         self.save_btn.setEnabled(False)
 
-    def apply_filters(self, tags: set, combine_logic: str, filter_logic: str):
-        # Filter images based on tags and logic
-        filtered_images = self.image_model.filter_images(
-            tags, combine_logic, filter_logic
-        )
+    def remove_tags(self, tags: set):
+        """Handle tag removal request"""
+        print(f"Removing {len(tags)} tags")
+        self.data_model.remove_tags(tags)
         
-        # Update gallery
+        # Clear all tag selections before updating tags
+        self.tag_panel.clear_all_selections()
+        
+        # Update tag panel with new frequencies
+        self.tag_panel.update_tags(self.data_model.tag_frequencies)
+        self.save_btn.setEnabled(bool(self.data_model.modified_files))
+        
+        # Show all images after tag removal
+        self.gallery.display_images(list(self.data_model.images.values()))
+        self.tag_panel.update_counter(len(self.data_model.images), len(self.data_model.images))
+
+    def apply_filters(self, tags: set, combine_logic: str, filter_logic: str):
+        print(f"Applying filters: {len(tags)} tags, {combine_logic}, {filter_logic}")
+        filtered_paths = self.data_model.filter_images(tags, combine_logic, filter_logic)
+        filtered_images = [self.data_model.images[path] for path in filtered_paths]
+        
+        # Update gallery with filtered images
         self.gallery.display_images(filtered_images)
         
         # Update counter
-        self.tag_panel.update_counter(len(filtered_images), 
-                                    len(self.image_model.images))
+        self.tag_panel.update_counter(len(filtered_images), len(self.data_model.images))
 
     def queue_tag_removal(self, tags):
         """Queue tags for removal"""
@@ -113,33 +137,6 @@ class TagEditorTab(QWidget):
         self.save_btn.setEnabled(True)
 
     def save_changes(self):
-        """Execute all pending changes"""
-        if self.tags_to_remove:
-            # Create the actual removal function
-            def remove_tags():
-                for image_data in self.image_model.images:
-                    if image_data.tags & self.tags_to_remove:
-                        # Get the tag file path
-                        tag_path = os.path.splitext(image_data.path)[0] + '.txt'
-                        if os.path.exists(tag_path):
-                            # Read current tags
-                            with open(tag_path, 'r', encoding='utf-8') as f:
-                                current_tags = {tag.strip() for tag in f.read().split(',') if tag.strip()}
-                            
-                            # Remove the specified tags
-                            updated_tags = current_tags - self.tags_to_remove
-                            
-                            # Write back the remaining tags
-                            with open(tag_path, 'w', encoding='utf-8') as f:
-                                f.write(','.join(updated_tags))
-
-            # Execute the removal
-            remove_tags()
-            self.tags_to_remove.clear()
-
-        # Clear pending status
-        self.tag_panel.clear_pending_status()
+        saved, total = self.data_model.save_changes(create_backup=True)
+        print(f"Saved {saved}/{total} files")
         self.save_btn.setEnabled(False)
-
-        # Reload to reflect changes
-        self.load_folder()

@@ -1,12 +1,12 @@
-from PySide6.QtWidgets import (QScrollArea, QWidget, QGridLayout, QVBoxLayout, 
-                              QLabel, QPushButton, QStackedWidget, QHBoxLayout)
+from PySide6.QtWidgets import (QScrollArea, QWidget, QGridLayout, QStackedLayout, 
+                              QPushButton, QVBoxLayout, QLabel, QHBoxLayout)
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QPixmap
+from .data_model import ImageData
 
 class ThumbnailWidget(QLabel):
     clicked = Signal(str)
 
-    def __init__(self, image_data):
+    def __init__(self, image_data: ImageData):
         super().__init__()
         self.image_path = image_data.path
         self.setFixedSize(150, 150)
@@ -35,9 +35,9 @@ class FullImageView(QWidget):
         super().__init__()
         self.current_image = None
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
         
         # Close button
+        close_layout = QHBoxLayout()
         self.close_btn = QPushButton("×")
         self.close_btn.setStyleSheet("""
             QPushButton {
@@ -50,32 +50,26 @@ class FullImageView(QWidget):
                 max-width: 20px;
                 max-height: 20px;
             }
-            QPushButton:hover {
-                background-color: #ff6666;
-            }
         """)
         self.close_btn.clicked.connect(self.closed.emit)
+        close_layout.addStretch()
+        close_layout.addWidget(self.close_btn)
+        layout.addLayout(close_layout)
         
-        btn_layout = QHBoxLayout()
-        btn_layout.addStretch()
-        btn_layout.addWidget(self.close_btn)
-        layout.addLayout(btn_layout)
-        
-        # Image label
+        # Image display
         self.image_label = QLabel()
         self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.image_label)
 
-    def load_image(self, path):
+    def load_image(self, path: str):
         self.current_image = path
         pixmap = QPixmap(path)
-        if not pixmap.isNull():
-            scaled = pixmap.scaled(
-                self.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation
-            )
-            self.image_label.setPixmap(scaled)
+        scaled = pixmap.scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.image_label.setPixmap(scaled)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -95,7 +89,7 @@ class GalleryView(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.stack = QStackedWidget()
+        self.stack = QStackedLayout()
         
         # Grid view
         self.scroll = QScrollArea()
@@ -109,38 +103,42 @@ class GalleryView(QWidget):
         self.full_view = FullImageView()
         self.full_view.closed.connect(self.show_grid)
         
+        # Add both views to stack
+        container = QWidget()
+        container.setLayout(self.stack)
         self.stack.addWidget(self.scroll)
         self.stack.addWidget(self.full_view)
         
-        layout.addWidget(self.stack)
+        layout.addWidget(container)
 
-    def display_images(self, images):
+    def display_images(self, images: list[ImageData]):
         # Clear current grid
         while self.grid.count():
             item = self.grid.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-        # Add new thumbnails
-        columns = max(1, self.scroll.viewport().width() // 160)
+        # Calculate columns based on width
+        width = self.scroll.viewport().width()
+        thumb_width = 155  # 150 + spacing
+        columns = max(1, width // thumb_width)
+
+        # Add thumbnails to grid
         for idx, image_data in enumerate(images):
             thumb = ThumbnailWidget(image_data)
             thumb.clicked.connect(self.show_full_image)
             self.grid.addWidget(thumb, idx // columns, idx % columns)
 
-    def show_full_image(self, path):
+    def show_full_image(self, path: str):
         self.full_view.load_image(path)
         self.stack.setCurrentWidget(self.full_view)
 
     def show_grid(self):
-        self.full_view.clear()
         self.stack.setCurrentWidget(self.scroll)
 
     def clear(self):
-        # Clear grid
         while self.grid.count():
             item = self.grid.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        # Clear full view
         self.full_view.clear()

@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, 
                               QPushButton, QFileDialog)
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from .gallery_view import GalleryView
 from .tag_panel import TagPanel
 from .data_model import DataModel
@@ -10,6 +10,7 @@ class TagEditorTab(QWidget):
     def __init__(self):
         super().__init__()
         self.data_model = DataModel()
+        self.modified_captions = {}  # Initialize modified_captions dictionary
         self.init_ui()
 
     def init_ui(self):
@@ -56,6 +57,24 @@ class TagEditorTab(QWidget):
         self.save_btn.clicked.connect(self.save_changes)
         self.tag_panel.filter_changed.connect(self.on_filter_changed)
         self.tag_panel.tags_removal_requested.connect(self.remove_tags)
+        self.tag_panel.caption_changed.connect(self.on_caption_changed)
+        self.gallery.image_selected.connect(self.on_image_selected)
+
+    def on_image_selected(self, image_path: str):
+        """Handle image selection"""
+        if image_path:  # Only process if an image is actually selected
+            image_data = self.data_model.images.get(image_path)
+            if image_data:
+                caption = ', '.join(sorted(image_data.tags))
+                self.tag_panel.set_caption(image_path, caption)
+        else:
+            self.tag_panel.clear()
+
+    def on_caption_changed(self, image_path: str, new_caption: str):
+        """Handle caption changes"""
+        print(f"Caption changed for {image_path}")
+        self.modified_captions[image_path] = new_caption
+        self.save_btn.setEnabled(True)
 
     def on_filter_changed(self, tags: set, combine_logic: str, filter_logic: str):
         print(f"TagEditorTab applying filter: {len(tags)} tags")  # Debug print
@@ -99,10 +118,16 @@ class TagEditorTab(QWidget):
         print("Load complete")
 
     def unload_folder(self):
+        """Unload current folder and clear all data"""
+        print("Unloading folder...")  # Debug print
         self.data_model.clear()
         self.gallery.clear()
         self.tag_panel.clear()
+        self.modified_captions.clear()
         self.save_btn.setEnabled(False)
+        # Update counter explicitly
+        self.tag_panel.update_counter(0, 0)
+        print("Folder unloaded")  # Debug print
 
     def remove_tags(self, tags: set):
         """Handle tag removal request"""
@@ -137,6 +162,24 @@ class TagEditorTab(QWidget):
         self.save_btn.setEnabled(True)
 
     def save_changes(self):
+        """Save all pending changes"""
+        print("Starting save process...")  # Debug print
+        
+        # Process caption changes first
+        for image_path, new_caption in self.modified_captions.items():
+            print(f"Processing caption change for {image_path}")  # Debug print
+            new_tags = {tag.strip() for tag in new_caption.split(',') if tag.strip()}
+            self.data_model.update_image_tags(image_path, new_tags)
+        
+        # Save all changes to disk
         saved, total = self.data_model.save_changes(create_backup=True)
-        print(f"Saved {saved}/{total} files")
+        print(f"Saved {saved}/{total} files")  # Debug print
+        
+        # Clear pending changes
+        self.modified_captions.clear()
         self.save_btn.setEnabled(False)
+        
+        # Reload to reflect changes
+        current_folder = self.path_input.text()
+        if current_folder and os.path.exists(current_folder):
+            self.load_folder()

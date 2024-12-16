@@ -2,6 +2,7 @@ from PySide6.QtWidgets import (QScrollArea, QWidget, QGridLayout, QStackedLayout
                               QPushButton, QVBoxLayout, QLabel, QHBoxLayout)
 from PySide6.QtCore import Qt, Signal
 from .data_model import ImageData
+from PySide6.QtGui import QPixmap
 
 class ThumbnailWidget(QLabel):
     clicked = Signal(str)
@@ -81,6 +82,8 @@ class FullImageView(QWidget):
         self.image_label.clear()
 
 class GalleryView(QWidget):
+    image_selected = Signal(str)  # Add this signal
+
     def __init__(self):
         super().__init__()
         self.init_ui()
@@ -111,6 +114,15 @@ class GalleryView(QWidget):
         
         layout.addWidget(container)
 
+    def show_full_image(self, path: str):
+        self.full_view.load_image(path)
+        self.stack.setCurrentWidget(self.full_view)
+        self.image_selected.emit(path)  # Emit signal when image is selected
+
+    def show_grid(self):
+        self.stack.setCurrentWidget(self.scroll)
+        self.image_selected.emit("")  # Emit empty path when returning to grid
+
     def display_images(self, images: list[ImageData]):
         # Clear current grid
         while self.grid.count():
@@ -129,16 +141,10 @@ class GalleryView(QWidget):
             thumb.clicked.connect(self.show_full_image)
             self.grid.addWidget(thumb, idx // columns, idx % columns)
 
-    def show_full_image(self, path: str):
-        self.full_view.load_image(path)
-        self.stack.setCurrentWidget(self.full_view)
-
-    def show_grid(self):
-        self.stack.setCurrentWidget(self.scroll)
-
     def clear(self):
         while self.grid.count():
             item = self.grid.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self.full_view.clear()
+        self.image_selected.emit("")  # Clear selected image

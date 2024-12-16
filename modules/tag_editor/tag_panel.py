@@ -1,8 +1,10 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QCheckBox, 
                               QGridLayout, QPushButton, QHBoxLayout, 
-                              QTabWidget, QScrollArea, QLabel, QGroupBox)
+                              QTabWidget, QScrollArea, QLabel, QGroupBox,
+                              QTextEdit)
 from PySide6.QtCore import Signal, Qt
 from collections import Counter
+import os
 
 class TagList(QScrollArea):
     tag_toggled = Signal(str, bool)
@@ -59,11 +61,21 @@ class TagList(QScrollArea):
             self.tag_checkboxes[tag] = checkbox
 
     def clear_all_checks(self):
+        """Clear all checkboxes and selected tags"""
         self.selected_tags.clear()
         for checkbox in self.tag_checkboxes.values():
             checkbox.blockSignals(True)
             checkbox.setChecked(False)
             checkbox.blockSignals(False)
+
+    def clear(self):
+        """Clear all tags from the list"""
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.tag_checkboxes.clear()
+        self.selected_tags.clear()
 
     def get_checked_tags(self) -> set[str]:
         return {tag for tag, cb in self.tag_checkboxes.items() if cb.isChecked()}
@@ -80,13 +92,6 @@ class TagList(QScrollArea):
                 visible_boxes.append(checkbox)
 
         self.reflow_checkboxes(visible_boxes)
-
-    def clear_all_checks(self):
-        self.selected_tags.clear()
-        for checkbox in self.tag_checkboxes.values():
-            checkbox.blockSignals(True)
-            checkbox.setChecked(False)
-            checkbox.blockSignals(False)
 
     def reflow_checkboxes(self, visible_boxes):
         columns = 3
@@ -112,18 +117,17 @@ class FilterTab(QWidget):
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
 
-        # Search box
+        # Search box and Clear button remain the same
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search tags...")
         self.search_input.textChanged.connect(self.filter_tag_list)
         layout.addWidget(self.search_input)
 
-        # Clear button
         self.clear_btn = QPushButton("Clear Filters")
         self.clear_btn.clicked.connect(self.clear_filters)
         layout.addWidget(self.clear_btn)
 
-        # Logic groups
+        # Logic groups - Modified implementation
         combine_group = QGroupBox("Combine Logic")
         combine_layout = QHBoxLayout()
         self.and_logic = QCheckBox("AND")
@@ -150,27 +154,32 @@ class FilterTab(QWidget):
 
         layout.addStretch()
 
-        # Connect logic changes
-        self.and_logic.toggled.connect(self.on_logic_changed)
-        self.or_logic.toggled.connect(self.on_logic_changed)
-        self.positive_logic.toggled.connect(self.on_logic_changed)
-        self.negative_logic.toggled.connect(self.on_logic_changed)
+        # Connect logic changes - Modified connections
+        self.and_logic.toggled.connect(self.on_combine_logic_changed)
+        self.or_logic.toggled.connect(self.on_combine_logic_changed)
+        self.positive_logic.toggled.connect(self.on_filter_logic_changed)
+        self.negative_logic.toggled.connect(self.on_filter_logic_changed)
 
-        # Make checkboxes mutually exclusive within groups
-        self.and_logic.toggled.connect(lambda checked: checked and self.or_logic.setChecked(False))
-        self.or_logic.toggled.connect(lambda checked: checked and self.and_logic.setChecked(False))
-        self.positive_logic.toggled.connect(lambda checked: checked and self.negative_logic.setChecked(False))
-        self.negative_logic.toggled.connect(lambda checked: checked and self.positive_logic.setChecked(False))
+    def on_combine_logic_changed(self, checked):
+        """Handle changes in AND/OR logic"""
+        if self.sender() == self.and_logic and checked:
+            self.or_logic.setChecked(False)
+        elif self.sender() == self.or_logic and checked:
+            self.and_logic.setChecked(False)
+        self.emit_filter_change()
+
+    def on_filter_logic_changed(self, checked):
+        """Handle changes in POSITIVE/NEGATIVE logic"""
+        if self.sender() == self.positive_logic and checked:
+            self.negative_logic.setChecked(False)
+        elif self.sender() == self.negative_logic and checked:
+            self.positive_logic.setChecked(False)
+        self.emit_filter_change()
 
     def clear_filters(self):
         self.selected_tags.clear()
         self.tag_list.clear_all_checks()
         self.emit_filter_change()
-
-    def on_logic_changed(self, checked):
-        """Handle logic checkbox changes"""
-        if checked:
-            self.emit_filter_change()
 
     def on_tag_toggled(self, tag: str, checked: bool):
         print(f"FilterTab received tag toggle: {tag}, {checked}")
@@ -183,8 +192,10 @@ class FilterTab(QWidget):
     def emit_filter_change(self):
         combine_logic = "AND" if self.and_logic.isChecked() else "OR"
         filter_logic = "POSITIVE" if self.positive_logic.isChecked() else "NEGATIVE"
-        print(f"Emitting filter: {len(self.selected_tags)} tags, {combine_logic}, {filter_logic}")
-        print(f"Selected tags: {self.selected_tags}")  # Debug print
+        print(f"Emitting filter: {len(self.selected_tags)} tags")
+        print(f"Selected tags: {self.selected_tags}")
+        print(f"Combine logic: {combine_logic}")
+        print(f"Filter logic: {filter_logic}")
         self.filter_changed.emit(self.selected_tags, combine_logic, filter_logic)
 
     def filter_tag_list(self, text):
@@ -208,6 +219,16 @@ class FilterTab(QWidget):
 
     def update_counter(self, visible: int, total: int):
         self.counter_label.setText(f"Showing: {visible}/{total} images")
+
+    def clear_counter(self):
+        """Clear the image counter"""
+        self.counter_label.setText("Showing: 0/0 images")
+
+    def clear(self):
+        """Clear all filters and counters"""
+        self.selected_tags.clear()
+        self.counter_label.setText("Showing: 0/0 images")
+        self.search_input.clear()
 
 class ActionTab(QWidget):
     remove_tags_requested = Signal(set)
@@ -244,9 +265,61 @@ class ActionTab(QWidget):
     def clear_status(self):
         self.status_label.clear()
 
+class EditCaptionTab(QWidget):
+    caption_changed = Signal(str, str)  # (image_path, new_caption)
+    
+    def __init__(self):
+        super().__init__()
+        self.current_image = None
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        # Caption edit box
+        self.caption_label = QLabel("No image selected")
+        layout.addWidget(self.caption_label)
+        
+        self.caption_edit = QTextEdit()
+        self.caption_edit.setPlaceholderText("Image tags will appear here when an image is selected...")
+        self.caption_edit.textChanged.connect(self.on_caption_changed)
+        layout.addWidget(self.caption_edit)
+
+        # Status label
+        self.status_label = QLabel()
+        self.status_label.setStyleSheet("color: gray;")
+        layout.addWidget(self.status_label)
+
+        layout.addStretch()
+
+    def set_caption(self, image_path: str, caption: str):
+        """Load caption for selected image"""
+        self.current_image = image_path
+        self.caption_edit.blockSignals(True)
+        self.caption_edit.setText(caption)
+        self.caption_edit.blockSignals(False)
+        self.caption_label.setText(f"Editing: {os.path.basename(image_path)}")
+        self.status_label.clear()
+
+    def on_caption_changed(self):
+        """Handle caption changes"""
+        if self.current_image:
+            self.status_label.setText("Changes pending...")
+            self.status_label.setStyleSheet("color: orange;")
+            self.caption_changed.emit(self.current_image, self.caption_edit.toPlainText())
+
+    def clear(self):
+        """Clear current caption"""
+        self.current_image = None
+        self.caption_edit.clear()
+        self.caption_label.setText("No image selected")
+        self.status_label.clear()
+
 class TagPanel(QWidget):
     filter_changed = Signal(set, str, str)
     tags_removal_requested = Signal(set)
+    caption_changed = Signal(str, str)
 
     def __init__(self):
         super().__init__()
@@ -264,21 +337,41 @@ class TagPanel(QWidget):
         
         # Filter tab
         self.filter_tab = FilterTab(self.tag_list)
-        # Connect filter tab signals to our own signals
         self.filter_tab.filter_changed.connect(self.on_filter_changed)
         
         # Action tab
         self.action_tab = ActionTab(self.tag_list)
         self.action_tab.remove_tags_requested.connect(self.tags_removal_requested.emit)
         
+        # Edit Caption tab
+        self.caption_tab = EditCaptionTab()
+        self.caption_tab.caption_changed.connect(self.caption_changed.emit)
+        
+        # Add tabs
         self.tab_widget.addTab(self.filter_tab, "FILTER")
         self.tab_widget.addTab(self.action_tab, "ACTIONS")
+        self.tab_widget.addTab(self.caption_tab, "EDIT CAPTION")
         
+        # Add components to layout
         layout.addWidget(self.tab_widget)
-        layout.addWidget(self.tag_list)
+        
+        # Add tag list (only visible for Filter and Actions tabs)
+        self.tag_list_container = QWidget()
+        tag_list_layout = QVBoxLayout(self.tag_list_container)
+        tag_list_layout.addWidget(self.tag_list)
+        layout.addWidget(self.tag_list_container)
+        
+        # Connect tab change signal
+        self.tab_widget.currentChanged.connect(self.on_tab_changed)
+
+    def on_tab_changed(self, index):
+        """Show/hide tag list based on selected tab"""
+        self.tag_list_container.setVisible(
+            self.tab_widget.tabText(index) != "EDIT CAPTION"
+        )
 
     def on_filter_changed(self, tags: set, combine_logic: str, filter_logic: str):
-        print(f"TagPanel forwarding filter: {len(tags)} tags")  # Debug print
+        print(f"TagPanel forwarding filter: {len(tags)} tags")
         self.filter_changed.emit(tags, combine_logic, filter_logic)
 
     def update_tags(self, tag_counts: Counter):
@@ -293,16 +386,20 @@ class TagPanel(QWidget):
         combine_logic = "AND" if self.filter_tab.and_logic.isChecked() else "OR"
         filter_logic = "POSITIVE" if self.filter_tab.positive_logic.isChecked() else "NEGATIVE"
         return tags, combine_logic, filter_logic
-    
-    def clear_all_selections(self):
-        """Clear all tag selections and reset filter state"""
-        self.tag_list.clear_all_checks()
-        self.filter_tab.selected_tags.clear()
-        self.filter_tab.emit_filter_change()
 
     def clear_status(self):
         self.action_tab.clear_status()
 
     def clear(self):
+        """Clear all data in the panel"""
         self.tag_list.clear_all_checks()
         self.action_tab.clear_status()
+        self.caption_tab.clear()
+        self.update_tags(Counter())  # Clear tags
+        self.filter_tab.clear_counter()  # Clear the counter
+
+    def set_caption(self, image_path: str, caption: str):
+        """Set caption for editing"""
+        self.caption_tab.set_caption(image_path, caption)
+        # Switch to caption tab
+        self.tab_widget.setCurrentWidget(self.caption_tab)

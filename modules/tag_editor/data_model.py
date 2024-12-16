@@ -58,7 +58,7 @@ class DataModel:
 
     def filter_images(self, tags: Set[str], combine_logic: str = "AND", 
                     filter_logic: str = "POSITIVE") -> List[str]:
-        print(f"Filtering with {len(tags)} tags using {combine_logic} logic")
+        print(f"Filtering with {len(tags)} tags using {combine_logic} logic and {filter_logic} mode")
         print(f"Tags to filter: {tags}")
         
         if not tags:
@@ -79,7 +79,7 @@ class DataModel:
                 if not matches:
                     matching_images.append(path)
 
-        print(f"Found {len(matching_images)} matching images")
+        print(f"Found {len(matching_images)} matching images with {filter_logic} logic")
         return matching_images
 
     def remove_tags(self, tags_to_remove: Set[str]) -> None:
@@ -99,6 +99,17 @@ class DataModel:
             self.tag_frequencies.update(image_data.tags)
         print(f"Updated tag frequencies: {len(self.tag_frequencies)} unique tags")
 
+    def update_image_tags(self, image_path: str, new_tags: set):
+        """Update tags for an image"""
+        print(f"Updating tags for {image_path}")
+        print(f"New tags: {new_tags}")
+        if image_path in self.images:
+            image_data = self.images[image_path]
+            image_data.tags = new_tags
+            image_data.modified = True
+            self.modified_files.add(image_path)
+            self.update_tag_frequencies()
+
     def save_changes(self, create_backup: bool = False) -> tuple[int, int]:
         saved_count = 0
         
@@ -106,6 +117,7 @@ class DataModel:
             image_data = self.images[image_path]
             txt_path = Path(image_path).with_suffix('.txt')
 
+            # Create backup if requested
             if create_backup and txt_path.exists():
                 try:
                     backup_num = 0
@@ -119,15 +131,23 @@ class DataModel:
                     print(f"Failed to create backup for {txt_path}: {e}")
                     continue
 
+            # Write new tags to file
             try:
-                txt_path.write_text(', '.join(sorted(image_data.tags)), encoding='utf-8')
+                # Sort tags and join with commas
+                tag_text = ', '.join(sorted(image_data.tags))
+                print(f"Writing tags to {txt_path}: {tag_text}")  # Debug print
+                
+                # Write to file
+                txt_path.write_text(tag_text, encoding='utf-8')
                 image_data.modified = False
                 saved_count += 1
+                print(f"Successfully saved {txt_path}")  # Debug print
             except Exception as e:
                 print(f"Failed to save {txt_path}: {e}")
 
         total_modified = len(self.modified_files)
         self.modified_files.clear()
+        print(f"Saved {saved_count}/{total_modified} files")  # Debug print
         return saved_count, total_modified
 
     def clear(self) -> None:

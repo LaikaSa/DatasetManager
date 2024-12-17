@@ -1,16 +1,20 @@
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, 
-                              QPushButton, QFileDialog)
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel,
+                              QPushButton, QFileDialog, QMessageBox, QCheckBox)
 from PySide6.QtCore import Qt, Signal
 from .gallery_view import GalleryView
 from .tag_panel import TagPanel
 from .data_model import DataModel
+from .loading_thread import LoadingThread 
 import os
+import shutil
+from send2trash import send2trash
 
 class TagEditorTab(QWidget):
     def __init__(self):
         super().__init__()
         self.data_model = DataModel()
-        self.modified_captions = {}  # Initialize modified_captions dictionary
+        self.modified_captions = {}
+        self.loading_thread = None
         self.init_ui()
 
     def init_ui(self):
@@ -29,11 +33,16 @@ class TagEditorTab(QWidget):
         self.save_btn = QPushButton("Save All Changes")
         self.save_btn.setEnabled(False)
         
+        # Add parallel loading checkbox
+        self.parallel_cb = QCheckBox("Parallel Loading")
+        self.parallel_cb.setToolTip("Use multiple CPU cores to speed up loading (may use more memory)")
+        
         top_layout.addWidget(self.path_input)
         top_layout.addWidget(self.browse_btn)
         top_layout.addWidget(self.load_btn)
         top_layout.addWidget(self.unload_btn)
         top_layout.addWidget(self.save_btn)
+        top_layout.addWidget(self.parallel_cb)
         
         layout.addLayout(top_layout)
 
@@ -47,6 +56,10 @@ class TagEditorTab(QWidget):
         # Tag panel
         self.tag_panel = TagPanel()
         split_layout.addWidget(self.tag_panel, 1)
+
+        # Add status label
+        self.status_label = QLabel()
+        layout.addWidget(self.status_label)
         
         layout.addLayout(split_layout)
 
@@ -59,6 +72,8 @@ class TagEditorTab(QWidget):
         self.tag_panel.tags_removal_requested.connect(self.remove_tags)
         self.tag_panel.caption_changed.connect(self.on_caption_changed)
         self.gallery.image_selected.connect(self.on_image_selected)
+        self.tag_panel.delete_requested.connect(self.delete_files)
+        self.tag_panel.move_requested.connect(self.move_files)
 
     def on_image_selected(self, image_path: str):
         """Handle image selection"""
@@ -95,27 +110,48 @@ class TagEditorTab(QWidget):
     def load_folder(self):
         folder = self.path_input.text()
         if not folder or not os.path.exists(folder):
-            print(f"Invalid folder path: {folder}")
+            self.status_label.setText("Invalid folder path")
             return
 
-        print("Starting folder load...")
-        self.data_model.load_directory(folder)
-        print("Directory loaded, updating UI...")
-        
-        # Update gallery
-        images = list(self.data_model.images.values())
-        print(f"Displaying {len(images)} images...")
-        self.gallery.display_images(images)
-        
-        # Update tag panel
-        print(f"Updating tag panel with {len(self.data_model.tag_frequencies)} tags...")
-        self.tag_panel.update_tags(self.data_model.tag_frequencies)
-        
-        # Update counter with total images
-        self.tag_panel.update_counter(len(images), len(images))
-        
-        self.save_btn.setEnabled(False)
-        print("Load complete")
+        # Disable controls during loading
+        self.load_btn.setEnabled(False)
+        self.unload_btn.setEnabled(False)
+        self.parallel_cb.setEnabled(False)
+        self.status_label.setText("Loading...")
+
+        # Start loading thread
+        self.loading_thread = LoadingThread(folder, self.parallel_cb.isChecked())
+        self.loading_thread.progress.connect(self.update_loading_status)
+        self.loading_thread.finished.connect(self.on_loading_finished)
+        self.loading_thread.start()
+
+    def update_loading_status(self, message):
+        """Update status label with loading progress"""
+        self.status_label.setText(message)
+
+    def on_loading_finished(self, result):
+        """Handle completion of loading thread"""
+        if result is None:
+            self.status_label.setText("Error loading folder")
+        else:
+            # Process results
+            for item in result['results']:
+                self.data_model.add_image(item)
+            
+            # Update UI
+            images = list(self.data_model.images.values())
+            self.gallery.display_images(images)
+            self.tag_panel.update_tags(self.data_model.tag_frequencies)
+            self.tag_panel.update_counter(len(images), len(images))
+            
+            self.status_label.setText(
+                f"Loaded {len(images)} images in {result['time']:.2f} seconds"
+            )
+
+        # Re-enable controls
+        self.load_btn.setEnabled(True)
+        self.unload_btn.setEnabled(True)
+        self.parallel_cb.setEnabled(True)
 
     def unload_folder(self):
         """Unload current folder and clear all data"""
@@ -160,6 +196,67 @@ class TagEditorTab(QWidget):
         """Queue tags for removal"""
         self.tags_to_remove.update(tags)
         self.save_btn.setEnabled(True)
+
+    def delete_files(self, delete_images: bool, delete_captions: bool):
+        """Move files to recycle bin"""
+        current_images = [img.path for img in self.gallery.get_visible_images()]
+        
+        deleted_images = 0
+        deleted_captions = 0
+
+        for img_path in current_images:
+            if delete_images:
+                try:
+                    send2trash(img_path)  # Send to recycle bin instead of permanent deletion
+                    deleted_images += 1
+                except Exception as e:
+                    print(f"Error sending image to recycle bin {img_path}: {e}")
+
+            if delete_captions:
+                caption_path = os.path.splitext(img_path)[0] + '.txt'
+                try:
+                    if os.path.exists(caption_path):
+                        send2trash(caption_path)  # Send to recycle bin instead of permanent deletion
+                        deleted_captions += 1
+                except Exception as e:
+                    print(f"Error sending caption to recycle bin {caption_path}: {e}")
+
+        # Reload folder to reflect changes
+        self.load_folder()
+        print(f"Moved {deleted_images} images and {deleted_captions} caption files to recycle bin")
+
+    def move_files(self, destination: str, move_images: bool, move_captions: bool):
+        """Move displayed files"""
+        current_images = [img.path for img in self.gallery.get_visible_images()]
+        
+        moved_images = 0
+        moved_captions = 0
+
+        for img_path in current_images:
+            if move_images:
+                try:
+                    new_img_path = os.path.join(destination, os.path.basename(img_path))
+                    shutil.move(img_path, new_img_path)
+                    moved_images += 1
+                except Exception as e:
+                    print(f"Error moving image {img_path}: {e}")
+
+            if move_captions:
+                caption_path = os.path.splitext(img_path)[0] + '.txt'
+                if os.path.exists(caption_path):
+                    try:
+                        new_caption_path = os.path.join(
+                            destination, 
+                            os.path.basename(caption_path)
+                        )
+                        shutil.move(caption_path, new_caption_path)
+                        moved_captions += 1
+                    except Exception as e:
+                        print(f"Error moving caption {caption_path}: {e}")
+
+        # Reload folder to reflect changes
+        self.load_folder()
+        print(f"Moved {moved_images} images and {moved_captions} caption files")
 
     def save_changes(self):
         """Save all pending changes"""

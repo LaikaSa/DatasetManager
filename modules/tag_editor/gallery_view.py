@@ -86,6 +86,7 @@ class GalleryView(QWidget):
 
     def __init__(self):
         super().__init__()
+        self.current_thumbnails = []  # Add this to track current visible images
         self.init_ui()
 
     def init_ui(self):
@@ -124,6 +125,9 @@ class GalleryView(QWidget):
         self.image_selected.emit("")  # Emit empty path when returning to grid
 
     def display_images(self, images: list[ImageData]):
+        # Store current visible images
+        self.current_thumbnails = images
+        
         # Clear current grid
         while self.grid.count():
             item = self.grid.takeAt(0)
@@ -141,10 +145,15 @@ class GalleryView(QWidget):
             thumb.clicked.connect(self.show_full_image)
             self.grid.addWidget(thumb, idx // columns, idx % columns)
 
+    def get_visible_images(self) -> list:
+        """Return currently visible images"""
+        return self.current_thumbnails
+
     def clear(self):
         while self.grid.count():
             item = self.grid.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self.full_view.clear()
-        self.image_selected.emit("")  # Clear selected image
+        self.current_thumbnails = []  # Clear the list
+        self.image_selected.emit("")

@@ -4,8 +4,8 @@ import torch.nn as nn
 import numpy as np
 from PIL import Image
 import datetime
-from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
-                              QFileDialog, QTabWidget, QHBoxLayout, 
+from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel, QSpinBox,
+                              QFileDialog, QTabWidget, QHBoxLayout, QCheckBox,
                               QDoubleSpinBox, QLineEdit, QScrollArea, QListWidget)
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
@@ -435,6 +435,18 @@ class MultipleImagesTab(QWidget):
         
         self.setLayout(layout)
 
+    def filter_by_resolution(self, paths, max_resolution):
+        filtered_paths = []
+        for path in paths:
+            try:
+                with Image.open(path) as img:
+                    width, height = img.size
+                    if width < max_resolution and height < max_resolution:
+                        filtered_paths.append(path)
+            except Exception as e:
+                logger.error(f"Error checking image {path}: {str(e)}")
+        return filtered_paths
+
     def handle_dir_input(self):
         path = self.dir_input.text().strip()
         if os.path.exists(path):
@@ -462,10 +474,23 @@ class MultipleImagesTab(QWidget):
 
     def update_file_list(self):
         self.file_list.clear()
-        for path in self.selected_paths:
+        paths_to_show = self.selected_paths
+        
+        # If resolution filter is enabled, filter the paths
+        if self.parent.resolution_check.isChecked():
+            max_resolution = self.parent.resolution_spin.value()
+            paths_to_show = self.filter_by_resolution(self.selected_paths, max_resolution)
+            
+            # Update info label with filtered count
+            total = len(self.selected_paths)
+            filtered = len(paths_to_show)
+            self.info_label.setText(f"{filtered}/{total} files selected (under {max_resolution}x{max_resolution})")
+        else:
+            self.info_label.setText(f"{len(paths_to_show)} files selected")
+
+        for path in paths_to_show:
             item_text = f"{os.path.basename(path)} ({os.path.dirname(path)})"
             self.file_list.addItem(item_text)
-        self.info_label.setText(f"{len(self.selected_paths)} files selected")
 
     def handle_dropped_files(self, files):
         if files:
@@ -574,17 +599,40 @@ class UpscalerTab(QWidget):
         self.tabs.addTab(self.single_tab, "Single Image")
         self.tabs.addTab(self.multiple_tab, "Multiple Images")
 
+        # Scale and resolution controls
+        controls_layout = QHBoxLayout()
+        
         # Scale selection
         scale_layout = QHBoxLayout()
         scale_layout.addWidget(QLabel("Scale factor:"))
-        self.scale_spin = QDoubleSpinBox()  # Change to QDoubleSpinBox
-        self.scale_spin.setRange(0.1, 16.0)  # Allow values from 0.1 to 16.0
-        self.scale_spin.setValue(4.0)  # Default to 4.0
-        self.scale_spin.setSingleStep(0.1)  # Set step to 0.1
-        self.scale_spin.setDecimals(1)  # Show one decimal place
+        self.scale_spin = QDoubleSpinBox()
+        self.scale_spin.setRange(0.1, 16.0)
+        self.scale_spin.setValue(4.0)
+        self.scale_spin.setSingleStep(0.1)
+        self.scale_spin.setDecimals(1)
         self.scale_spin.setSuffix('x')
         scale_layout.addWidget(self.scale_spin)
-        scale_layout.addStretch()
+        
+        # Resolution filter
+        resolution_layout = QHBoxLayout()
+        self.resolution_check = QCheckBox("Only upscale images smaller than:")
+        self.resolution_spin = QSpinBox()
+        self.resolution_spin.setRange(1, 10000)
+        self.resolution_spin.setValue(1024)
+        self.resolution_spin.setSuffix(' px')
+        self.resolution_spin.setEnabled(False)  # Disabled by default
+        resolution_layout.addWidget(self.resolution_check)
+        resolution_layout.addWidget(self.resolution_spin)
+        
+        # Connect resolution filter changes
+        self.resolution_check.stateChanged.connect(self.toggle_resolution_filter)
+        self.resolution_spin.valueChanged.connect(self.update_file_list)
+        
+        # Add all controls to the controls layout
+        controls_layout.addLayout(scale_layout)
+        controls_layout.addSpacing(20)  # Add some space between controls
+        controls_layout.addLayout(resolution_layout)
+        controls_layout.addStretch()
 
         # Model download section
         model_layout = QHBoxLayout()
@@ -613,7 +661,7 @@ class UpscalerTab(QWidget):
 
         # Add all layouts
         layout.addWidget(self.tabs)
-        layout.addLayout(scale_layout)
+        layout.addLayout(controls_layout)
         layout.addLayout(model_layout)
         layout.addLayout(button_layout)
         layout.addWidget(self.status_area)
@@ -624,9 +672,11 @@ class UpscalerTab(QWidget):
         self.stop_btn.clicked.connect(self.stop_upscale)
 
         self.setLayout(layout)
-        
-        # Check if model exists
         self.check_model()
+
+    def update_file_list(self):
+        if isinstance(self.tabs.currentWidget(), MultipleImagesTab):
+            self.multiple_tab.update_file_list()
 
     def check_model(self):
         # Get project root directory (two levels up from the module file)
@@ -651,6 +701,10 @@ class UpscalerTab(QWidget):
             self.start_btn.setEnabled(len(input_paths) > 0)
         else:
             self.start_btn.setEnabled(False)
+
+    def toggle_resolution_filter(self, state):
+        self.resolution_spin.setEnabled(bool(state))  # Convert state to boolean
+        self.update_file_list()
 
     def download_model(self):
         self.download_btn.setEnabled(False)
@@ -682,7 +736,12 @@ class UpscalerTab(QWidget):
             return
 
         current_tab = self.tabs.currentWidget()
-        input_paths = current_tab.get_input_paths()
+        if isinstance(current_tab, MultipleImagesTab) and self.resolution_check.isChecked():
+            # Get filtered paths for multiple images tab when resolution filter is enabled
+            max_resolution = self.resolution_spin.value()
+            input_paths = current_tab.filter_by_resolution(current_tab.get_input_paths(), max_resolution)
+        else:
+            input_paths = current_tab.get_input_paths()
         
         if not input_paths:
             self.update_status("No input files selected")
@@ -703,6 +762,8 @@ class UpscalerTab(QWidget):
         self.stop_btn.setEnabled(True)
         self.tabs.setEnabled(False)
         self.scale_spin.setEnabled(False)
+        self.resolution_check.setEnabled(False)
+        self.resolution_spin.setEnabled(False)
         self.status_text.setText("")
         
         self.worker.start()
@@ -716,9 +777,10 @@ class UpscalerTab(QWidget):
     def upscale_finished(self):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.browse_btn.setEnabled(True)
-        self.input_path.setEnabled(True)
-        self.scale_spin.setEnabled(True)  # Re-enable scale selection
+        self.tabs.setEnabled(True)
+        self.scale_spin.setEnabled(True)
+        self.resolution_check.setEnabled(True)
+        self.resolution_spin.setEnabled(True)
 
     def stop_upscale(self):
         if self.worker and self.worker.isRunning():

@@ -96,7 +96,7 @@ class ImageResizerTab(QWidget):
         resolution_layout.addWidget(QLabel("Maximum resolution:"))
         self.resolution_spin = QSpinBox()
         self.resolution_spin.setRange(100, 10000)
-        self.resolution_spin.setValue(1000)
+        self.resolution_spin.setValue(1024)
         resolution_layout.addWidget(self.resolution_spin)
         resolution_layout.addWidget(QLabel("pixels"))
         resolution_layout.addStretch()

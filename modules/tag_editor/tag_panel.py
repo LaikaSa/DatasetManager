@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QCheckBox, 
-                              QGridLayout, QPushButton, QHBoxLayout, 
+                              QGridLayout, QPushButton, QHBoxLayout, QFileDialog, 
                               QTabWidget, QScrollArea, QLabel, QGroupBox,
-                              QTextEdit)
+                              QTextEdit, QMessageBox)
 from PySide6.QtCore import Signal, Qt
 from collections import Counter
 import os
@@ -320,6 +320,8 @@ class TagPanel(QWidget):
     filter_changed = Signal(set, str, str)
     tags_removal_requested = Signal(set)
     caption_changed = Signal(str, str)
+    delete_requested = Signal(bool, bool)
+    move_requested = Signal(str, bool, bool)
 
     def __init__(self):
         super().__init__()
@@ -347,10 +349,16 @@ class TagPanel(QWidget):
         self.caption_tab = EditCaptionTab()
         self.caption_tab.caption_changed.connect(self.caption_changed.emit)
         
-        # Add tabs
+        # Delete/Move tab
+        self.delete_move_tab = DeleteMoveTab()
+        self.delete_move_tab.delete_requested.connect(self.delete_requested.emit)
+        self.delete_move_tab.move_requested.connect(self.move_requested.emit)
+        
+        # Add all tabs
         self.tab_widget.addTab(self.filter_tab, "FILTER")
         self.tab_widget.addTab(self.action_tab, "ACTIONS")
         self.tab_widget.addTab(self.caption_tab, "EDIT CAPTION")
+        self.tab_widget.addTab(self.delete_move_tab, "DELETE/MOVE")
         
         # Add components to layout
         layout.addWidget(self.tab_widget)
@@ -403,3 +411,124 @@ class TagPanel(QWidget):
         self.caption_tab.set_caption(image_path, caption)
         # Switch to caption tab
         self.tab_widget.setCurrentWidget(self.caption_tab)
+
+class DeleteMoveTab(QWidget):
+    delete_requested = Signal(bool, bool)  # (move_images, move_captions)
+    move_requested = Signal(str, bool, bool)  # (destination, move_images, move_captions)
+
+    def __init__(self):
+        super().__init__()
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+        layout.setSpacing(10)
+
+        # Delete section
+        delete_group = QGroupBox("Delete")
+        delete_layout = QVBoxLayout()
+        
+        self.delete_btn = QPushButton("Delete Displayed")
+        self.delete_btn.clicked.connect(self.on_delete_clicked)
+        delete_layout.addWidget(self.delete_btn)
+        
+        delete_group.setLayout(delete_layout)
+        layout.addWidget(delete_group)
+
+        # Move section
+        move_group = QGroupBox("Move")
+        move_layout = QVBoxLayout()
+        
+        # Destination input
+        dest_layout = QHBoxLayout()
+        self.dest_input = QLineEdit()
+        self.dest_input.setPlaceholderText("Destination folder path...")
+        self.browse_btn = QPushButton("Browse")
+        self.browse_btn.clicked.connect(self.browse_destination)
+        dest_layout.addWidget(self.dest_input)
+        dest_layout.addWidget(self.browse_btn)
+        move_layout.addLayout(dest_layout)
+        
+        # Move button
+        self.move_btn = QPushButton("Move Displayed")
+        self.move_btn.clicked.connect(self.on_move_clicked)
+        move_layout.addWidget(self.move_btn)
+        
+        move_group.setLayout(move_layout)
+        layout.addWidget(move_group)
+
+        # File type checkboxes
+        self.file_group = QGroupBox("Files to Process")
+        file_layout = QHBoxLayout()
+        
+        self.image_cb = QCheckBox("Images")
+        self.caption_cb = QCheckBox("Caption Files")
+        self.image_cb.setChecked(True)  # Default checked
+        self.caption_cb.setChecked(True)  # Default checked
+        
+        file_layout.addWidget(self.image_cb)
+        file_layout.addWidget(self.caption_cb)
+        
+        self.file_group.setLayout(file_layout)
+        layout.addWidget(self.file_group)
+
+        # Status label
+        self.status_label = QLabel()
+        self.status_label.setStyleSheet("color: gray;")
+        layout.addWidget(self.status_label)
+
+        layout.addStretch()
+
+    def browse_destination(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Destination Folder")
+        if folder:
+            self.dest_input.setText(folder)
+
+    def on_delete_clicked(self):
+        if not (self.image_cb.isChecked() or self.caption_cb.isChecked()):
+            self.status_label.setText("Please select at least one file type")
+            self.status_label.setStyleSheet("color: red;")
+            return
+
+        reply = QMessageBox.question(
+            self, 
+            'Confirm Delete',
+            'Are you sure you want to move the displayed files to recycle bin?',  # Updated message
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+
+        if reply == QMessageBox.Yes:
+            self.delete_requested.emit(
+                self.image_cb.isChecked(),
+                self.caption_cb.isChecked()
+            )
+
+    def on_move_clicked(self):
+        destination = self.dest_input.text()
+        if not destination:
+            self.status_label.setText("Please specify destination folder")
+            self.status_label.setStyleSheet("color: red;")
+            return
+
+        if not (self.image_cb.isChecked() or self.caption_cb.isChecked()):
+            self.status_label.setText("Please select at least one file type")
+            self.status_label.setStyleSheet("color: red;")
+            return
+
+        if not os.path.exists(destination):
+            try:
+                os.makedirs(destination)
+            except Exception as e:
+                self.status_label.setText(f"Error creating destination folder: {e}")
+                self.status_label.setStyleSheet("color: red;")
+                return
+
+        self.move_requested.emit(
+            destination,
+            self.image_cb.isChecked(),
+            self.caption_cb.isChecked()
+        )
+
+    def clear_status(self):
+        self.status_label.clear()

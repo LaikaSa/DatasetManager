@@ -21,6 +21,33 @@ class DataModel:
         self.modified_files: Set[str] = set()
         self.parallel_loader = ParallelLoader()
 
+    def filter_images(self, tags: Set[str], combine_logic: str = "AND", 
+                     filter_logic: str = "POSITIVE") -> List[str]:
+        """Filter images based on tags and logic"""
+        print(f"Filtering with {len(tags)} tags using {combine_logic} logic and {filter_logic} mode")
+        print(f"Tags to filter: {tags}")
+        
+        if not tags:
+            return list(self.images.values())
+
+        matching_images = []
+        for image_data in self.images.values():
+            matches = False
+            if combine_logic == "AND":
+                matches = tags.issubset(image_data.tags)
+            else:  # OR
+                matches = bool(tags & image_data.tags)
+
+            if filter_logic == "POSITIVE":
+                if matches:
+                    matching_images.append(image_data)
+            else:  # NEGATIVE
+                if not matches:
+                    matching_images.append(image_data)
+
+        print(f"Found {len(matching_images)} matching images with {filter_logic} logic")
+        return matching_images
+
     def load_directory(self, directory: str, use_parallel: bool = False) -> None:
         print(f"\nStarting directory load: {directory}")
         print(f"Using parallel loading: {use_parallel}")

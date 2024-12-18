@@ -92,11 +92,10 @@ class TagEditorTab(QWidget):
         self.save_btn.setEnabled(True)
 
     def on_filter_changed(self, tags: set, combine_logic: str, filter_logic: str):
-        print(f"TagEditorTab applying filter: {len(tags)} tags")  # Debug print
-        filtered_paths = self.data_model.filter_images(tags, combine_logic, filter_logic)
-        filtered_images = [self.data_model.images[path] for path in filtered_paths]
+        print(f"TagEditorTab applying filter: {len(tags)} tags")
+        filtered_images = self.data_model.filter_images(tags, combine_logic, filter_logic)
         
-        # Update gallery with filtered images
+        # Update gallery with filtered images directly
         self.gallery.display_images(filtered_images)
         
         # Update counter

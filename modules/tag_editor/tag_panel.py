@@ -209,13 +209,8 @@ class FilterTab(QWidget):
             if visible:
                 visible_boxes.append(checkbox)
 
-        # Reflow visible checkboxes
-        columns = 3
-        for idx, checkbox in enumerate(visible_boxes):
-            row = idx // columns
-            col = idx % columns
-            self.grid.removeWidget(checkbox)
-            self.grid.addWidget(checkbox, row, col)
+        # Use tag_list's grid instead of self.grid
+        self.tag_list.reflow_checkboxes(visible_boxes)
 
     def update_counter(self, visible: int, total: int):
         self.counter_label.setText(f"Showing: {visible}/{total} images")

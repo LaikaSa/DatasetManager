@@ -80,7 +80,7 @@ class TagEditorTab(QWidget):
         if image_path:  # Only process if an image is actually selected
             image_data = self.data_model.images.get(image_path)
             if image_data:
-                caption = ', '.join(sorted(image_data.tags))
+                caption = ', '.join(image_data.tags)
                 self.tag_panel.set_caption(image_path, caption)
         else:
             self.tag_panel.clear()
@@ -264,7 +264,13 @@ class TagEditorTab(QWidget):
         # Process caption changes first
         for image_path, new_caption in self.modified_captions.items():
             print(f"Processing caption change for {image_path}")  # Debug print
-            new_tags = {tag.strip() for tag in new_caption.split(',') if tag.strip()}
+            seen = set()
+            new_tags = []
+            for tag in new_caption.split(','):
+                tag = tag.strip()
+                if tag and tag not in seen:
+                    seen.add(tag)
+                    new_tags.append(tag)
             self.data_model.update_image_tags(image_path, new_tags)
         
         # Save all changes to disk

@@ -27,12 +27,17 @@ def process_single_image(args):
             # Convert to numpy array for transfer
             img_array = np.array(thumbnail)
 
-        # Read tags
+        # Read tags (preserve order, drop duplicates)
         tag_path = str(Path(image_path).with_suffix('.txt'))
-        tags = set()
+        tags = []
         if os.path.exists(tag_path):
             with open(tag_path, 'r', encoding='utf-8') as f:
-                tags = {tag.strip().lower() for tag in f.read().split(',') if tag.strip()}
+                seen = set()
+                for tag in f.read().split(','):
+                    tag = tag.strip().lower()
+                    if tag and tag not in seen:
+                        seen.add(tag)
+                        tags.append(tag)
 
         return {
             'path': image_path,

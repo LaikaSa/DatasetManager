@@ -10,7 +10,7 @@ import time
 @dataclass
 class ImageData:
     path: str
-    tags: set
+    tags: list
     thumbnail: QPixmap = None
     modified: bool = False
 
@@ -36,7 +36,7 @@ class DataModel:
             if combine_logic == "AND":
                 matches = tags.issubset(image_data.tags)
             else:  # OR
-                matches = bool(tags & image_data.tags)
+                matches = bool(tags & set(image_data.tags))
 
             if filter_logic == "POSITIVE":
                 if matches:
@@ -90,14 +90,17 @@ class DataModel:
                     image_path = str(file_path)
                     tag_path = file_path.with_suffix('.txt')
                     
-                    # Load tags
-                    tags = set()
+                    # Load tags (preserve order, drop duplicates)
+                    tags = []
                     if tag_path.exists():
                         try:
                             with open(tag_path, 'r', encoding='utf-8') as f:
-                                tags = {tag.strip().lower() 
-                                      for tag in f.read().split(',') 
-                                      if tag.strip()}
+                                seen = set()
+                                for tag in f.read().split(','):
+                                    tag = tag.strip().lower()
+                                    if tag and tag not in seen:
+                                        seen.add(tag)
+                                        tags.append(tag)
                         except Exception as e:
                             print(f"Error loading tags for {image_path}: {e}")
 
@@ -139,8 +142,8 @@ class DataModel:
     def remove_tags(self, tags_to_remove: Set[str]) -> None:
         print(f"Removing tags: {tags_to_remove}")
         for image_data in self.images.values():
-            if image_data.tags & tags_to_remove:  # If there are tags to remove
-                image_data.tags -= tags_to_remove
+            if set(image_data.tags) & tags_to_remove:  # If there are tags to remove
+                image_data.tags = [t for t in image_data.tags if t not in tags_to_remove]
                 image_data.modified = True
                 self.modified_files.add(image_data.path)
         
@@ -188,7 +191,7 @@ class DataModel:
             # Write new tags to file
             try:
                 # Sort tags and join with commas
-                tag_text = ', '.join(sorted(image_data.tags))
+                tag_text = ', '.join(image_data.tags)
                 print(f"Writing tags to {txt_path}: {tag_text}")  # Debug print
                 
                 # Write to file

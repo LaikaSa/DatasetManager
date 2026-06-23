@@ -1,4 +1,5 @@
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtGui import QPixmap
 from pathlib import Path
 from .parallel_loader import ParallelLoader
 import time
@@ -55,13 +56,16 @@ class LoadingThread(QThread):
             tag_path = file_path.with_suffix('.txt')
             
             try:
-                # Load tags
-                tags = set()
+                # Load tags (preserve order, drop duplicates)
+                tags = []
                 if tag_path.exists():
                     with open(tag_path, 'r', encoding='utf-8') as f:
-                        tags = {tag.strip().lower() 
-                               for tag in f.read().split(',') 
-                               if tag.strip()}
+                        seen = set()
+                        for tag in f.read().split(','):
+                            tag = tag.strip().lower()
+                            if tag and tag not in seen:
+                                seen.add(tag)
+                                tags.append(tag)
 
                 # Create thumbnail
                 thumbnail = QPixmap(image_path)

@@ -170,7 +170,7 @@ class TagEditorTab(QWidget):
         self.data_model.remove_tags(tags)
         
         # Clear all tag selections before updating tags
-        self.tag_panel.clear_all_selections()
+        self.tag_panel.tag_list.clear_all_checks()
         
         # Update tag panel with new frequencies
         self.tag_panel.update_tags(self.data_model.tag_frequencies)

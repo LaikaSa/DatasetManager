@@ -33,6 +33,11 @@ class TagEditorTab(QWidget):
         self.save_btn = QPushButton("Save All Changes")
         self.save_btn.setEnabled(False)
         
+        # Add backup captions checkbox (default off)
+        self.backup_cb = QCheckBox("Backup Old Captions")
+        self.backup_cb.setChecked(False)
+        self.backup_cb.setToolTip("Save old caption files as .000, .001, etc. before overwriting")
+
         # Add parallel loading checkbox
         self.parallel_cb = QCheckBox("Parallel Loading")
         self.parallel_cb.setToolTip("Use multiple CPU cores to speed up loading (may use more memory)")
@@ -42,6 +47,7 @@ class TagEditorTab(QWidget):
         top_layout.addWidget(self.load_btn)
         top_layout.addWidget(self.unload_btn)
         top_layout.addWidget(self.save_btn)
+        top_layout.addWidget(self.backup_cb)
         top_layout.addWidget(self.parallel_cb)
         
         layout.addLayout(top_layout)
@@ -70,6 +76,7 @@ class TagEditorTab(QWidget):
         self.save_btn.clicked.connect(self.save_changes)
         self.tag_panel.filter_changed.connect(self.on_filter_changed)
         self.tag_panel.tags_removal_requested.connect(self.remove_tags)
+        self.tag_panel.replace_add_tags_requested.connect(self.replace_add_tags)
         self.tag_panel.caption_changed.connect(self.on_caption_changed)
         self.gallery.image_selected.connect(self.on_image_selected)
         self.tag_panel.delete_requested.connect(self.delete_files)
@@ -169,8 +176,8 @@ class TagEditorTab(QWidget):
         print(f"Removing {len(tags)} tags")
         self.data_model.remove_tags(tags)
         
-        # Clear all tag selections before updating tags
-        self.tag_panel.tag_list.clear_all_checks()
+        # Clear all tag selections before updating tags (also resets FilterTab's own selected_tags)
+        self.tag_panel.filter_tab.clear_filters()
         
         # Update tag panel with new frequencies
         self.tag_panel.update_tags(self.data_model.tag_frequencies)
@@ -179,6 +186,20 @@ class TagEditorTab(QWidget):
         # Show all images after tag removal
         self.gallery.display_images(list(self.data_model.images.values()))
         self.tag_panel.update_counter(len(self.data_model.images), len(self.data_model.images))
+        
+    def replace_add_tags(self, replace_tags: set, new_tags: list, positions: list):
+            """Handle replace/add tags request"""
+            print(f"Replace/add: removing {len(replace_tags)} tags, inserting {len(new_tags)} at {positions}")
+            self.data_model.replace_or_add_tags(replace_tags, new_tags, positions)
+
+            # Clear filter selections in case a replaced tag was being filtered on
+            self.tag_panel.filter_tab.clear_filters()
+
+            # Refresh tag panel and gallery
+            self.tag_panel.update_tags(self.data_model.tag_frequencies)
+            self.save_btn.setEnabled(bool(self.data_model.modified_files))
+            self.gallery.display_images(list(self.data_model.images.values()))
+            self.tag_panel.update_counter(len(self.data_model.images), len(self.data_model.images))
 
     def apply_filters(self, tags: set, combine_logic: str, filter_logic: str):
         print(f"Applying filters: {len(tags)} tags, {combine_logic}, {filter_logic}")
@@ -274,7 +295,7 @@ class TagEditorTab(QWidget):
             self.data_model.update_image_tags(image_path, new_tags)
         
         # Save all changes to disk
-        saved, total = self.data_model.save_changes(create_backup=True)
+        saved, total = self.data_model.save_changes(create_backup=self.backup_cb.isChecked())
         print(f"Saved {saved}/{total} files")  # Debug print
         
         # Clear pending changes

@@ -1,7 +1,7 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QCheckBox, 
                               QGridLayout, QPushButton, QHBoxLayout, QFileDialog, 
                               QTabWidget, QScrollArea, QLabel, QGroupBox,
-                              QTextEdit, QMessageBox)
+                              QTextEdit, QMessageBox, QDialog, QDialogButtonBox, QSpinBox)
 from PySide6.QtCore import Signal, Qt
 from collections import Counter
 import os
@@ -225,8 +225,81 @@ class FilterTab(QWidget):
         self.counter_label.setText("Showing: 0/0 images")
         self.search_input.clear()
 
+class ReplaceAddTagsDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Replace or Add Tags")
+        self.setMinimumWidth(420)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        layout.addWidget(QLabel("Tags to replace (comma-separated, leave empty to just add):"))
+        self.replace_input = QLineEdit()
+        self.replace_input.setPlaceholderText("e.g. old_tag1, old_tag2")
+        layout.addWidget(self.replace_input)
+
+        layout.addWidget(QLabel("New tags (comma-separated):"))
+        self.new_tags_input = QLineEdit()
+        self.new_tags_input.setPlaceholderText("e.g. new_tag1, new_tag2")
+        layout.addWidget(self.new_tags_input)
+
+        position_group = QGroupBox("Insert position")
+        position_layout = QHBoxLayout()
+
+        self.top_cb = QCheckBox("Top")
+        self.middle_cb = QCheckBox("Middle")
+        self.bottom_cb = QCheckBox("Bottom")
+        self.custom_cb = QCheckBox("Custom:")
+        self.custom_spin = QSpinBox()
+        self.custom_spin.setMinimum(1)
+        self.custom_spin.setMaximum(9999)
+        self.custom_spin.setValue(1)
+        self.custom_spin.setEnabled(False)
+        self.custom_cb.toggled.connect(self.custom_spin.setEnabled)
+
+        position_layout.addWidget(self.top_cb)
+        position_layout.addWidget(self.middle_cb)
+        position_layout.addWidget(self.bottom_cb)
+        position_layout.addWidget(self.custom_cb)
+        position_layout.addWidget(self.custom_spin)
+        position_layout.addStretch()
+        position_group.setLayout(position_layout)
+        layout.addWidget(position_group)
+
+        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        button_box.button(QDialogButtonBox.Ok).setText("Confirm")
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def get_result(self):
+        replace_tags = {t.strip().lower() for t in self.replace_input.text().split(',') if t.strip()}
+
+        new_tags = []
+        seen = set()
+        for t in self.new_tags_input.text().split(','):
+            t = t.strip().lower()
+            if t and t not in seen:
+                seen.add(t)
+                new_tags.append(t)
+
+        positions = []
+        if self.top_cb.isChecked():
+            positions.append('top')
+        if self.middle_cb.isChecked():
+            positions.append('middle')
+        if self.bottom_cb.isChecked():
+            positions.append('bottom')
+        if self.custom_cb.isChecked():
+            positions.append(('custom', self.custom_spin.value()))
+
+        return replace_tags, new_tags, positions
+
 class ActionTab(QWidget):
     remove_tags_requested = Signal(set)
+    replace_add_tags_requested = Signal(set, list, list)
 
     def __init__(self, tag_list):
         super().__init__()
@@ -240,12 +313,29 @@ class ActionTab(QWidget):
         self.remove_btn = QPushButton("Remove Selected Tags")
         self.remove_btn.clicked.connect(self.on_remove_clicked)
         layout.addWidget(self.remove_btn)
+
+        # Replace or add tags button
+        self.replace_add_btn = QPushButton("Replace or Add Tags")
+        self.replace_add_btn.clicked.connect(self.on_replace_add_clicked)
+        layout.addWidget(self.replace_add_btn)
         
         # Status label
         self.status_label = QLabel()
         layout.addWidget(self.status_label)
         
         layout.addStretch()
+
+    def on_replace_add_clicked(self):
+        dialog = ReplaceAddTagsDialog(self)
+        if dialog.exec() == QDialog.Accepted:
+            replace_tags, new_tags, positions = dialog.get_result()
+            if not new_tags:
+                self.status_label.setText("No new tags entered")
+                self.status_label.setStyleSheet("color: red")
+                return
+            self.replace_add_tags_requested.emit(replace_tags, new_tags, positions)
+            self.status_label.setText(f"Queued replace/add for {len(new_tags)} tag(s)")
+            self.status_label.setStyleSheet("color: orange")
 
     def on_remove_clicked(self):
         tags = self.tag_list.get_checked_tags()
@@ -314,6 +404,7 @@ class EditCaptionTab(QWidget):
 class TagPanel(QWidget):
     filter_changed = Signal(set, str, str)
     tags_removal_requested = Signal(set)
+    replace_add_tags_requested = Signal(set, list, list)
     caption_changed = Signal(str, str)
     delete_requested = Signal(bool, bool)
     move_requested = Signal(str, bool, bool)
@@ -339,6 +430,7 @@ class TagPanel(QWidget):
         # Action tab
         self.action_tab = ActionTab(self.tag_list)
         self.action_tab.remove_tags_requested.connect(self.tags_removal_requested.emit)
+        self.action_tab.replace_add_tags_requested.connect(self.replace_add_tags_requested.emit)
         
         # Edit Caption tab
         self.caption_tab = EditCaptionTab()

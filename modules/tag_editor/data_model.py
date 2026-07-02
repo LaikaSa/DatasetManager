@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Set, Dict, List
+from typing import Set, Dict, List, Tuple, Union
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt
 from collections import Counter
@@ -149,6 +149,55 @@ class DataModel:
         
         # Update tag frequencies
         self.update_tag_frequencies()
+
+    def replace_or_add_tags(self, tags_to_replace: Set[str], new_tags: List[str],
+                                 positions: List[Union[str, Tuple[str, int]]]) -> None:
+            """
+            tags_to_replace: set of tags to remove first (empty set = pure add, no removal).
+            new_tags: ordered list of tags to insert.
+            positions: list made of 'top', 'middle', 'bottom', and/or ('custom', n).
+                       If multiple are given, new_tags are cloned and inserted at each spot.
+            """
+            if not new_tags:
+                return
+
+            for image_data in self.images.values():
+                tags = image_data.tags
+                changed = False
+
+                if tags_to_replace and (set(tags) & tags_to_replace):
+                    tags = [t for t in tags if t not in tags_to_replace]
+                    changed = True
+
+                base_len = len(tags)
+                indices = []
+                for pos in positions:
+                    if pos == 'top':
+                        idx = 0
+                    elif pos == 'middle':
+                        idx = base_len // 2
+                    elif pos == 'bottom':
+                        idx = base_len
+                    elif isinstance(pos, tuple) and pos[0] == 'custom':
+                        idx = max(0, min(pos[1] - 1, base_len))
+                    else:
+                        continue
+                    indices.append(idx)
+
+                if not indices:
+                    indices = [base_len]  # default to bottom if nothing selected
+
+                # Insert highest index first so earlier indices stay valid
+                for idx in sorted(indices, reverse=True):
+                    tags[idx:idx] = new_tags
+                    changed = True
+
+                if changed:
+                    image_data.tags = tags
+                    image_data.modified = True
+                    self.modified_files.add(image_data.path)
+
+            self.update_tag_frequencies()
 
     def update_tag_frequencies(self) -> None:
         self.tag_frequencies.clear()

@@ -7,10 +7,6 @@ set "PYTHON_DIR=%SCRIPT_DIR%python"
 set "PYTHON_URL=https://www.python.org/ftp/python/3.11.9/python-3.11.9-embed-amd64.zip"
 set "GET_PIP_URL=https://bootstrap.pypa.io/get-pip.py"
 
-:: Create necessary directories
-mkdir "%SCRIPT_DIR%\logs" 2>nul
-mkdir "%SCRIPT_DIR%\settings" 2>nul
-
 echo Setting up environment in: %SCRIPT_DIR%
 
 :: Check if Python is already installed

@@ -165,10 +165,25 @@ class DataModel:
                 tags = image_data.tags
                 changed = False
 
+<<<<<<< HEAD
+                # Remove tags marked for replacement
+=======
+>>>>>>> 903061ed43c81392de5d7b1fa1ae2fa604cf7495
                 if tags_to_replace and (set(tags) & tags_to_replace):
                     tags = [t for t in tags if t not in tags_to_replace]
                     changed = True
 
+<<<<<<< HEAD
+                # Also strip any new_tags that already exist in the list —
+                # they will be re-inserted at the desired position (move, not duplicate)
+                new_tags_set = set(new_tags)
+                existing_new = new_tags_set & set(tags)
+                if existing_new:
+                    tags = [t for t in tags if t not in existing_new]
+                    changed = True
+
+=======
+>>>>>>> 903061ed43c81392de5d7b1fa1ae2fa604cf7495
                 base_len = len(tags)
                 indices = []
                 for pos in positions:

@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel,
-                              QPushButton, QFileDialog, QMessageBox, QCheckBox)
-from PySide6.QtCore import Qt, Signal
+                              QPushButton, QFileDialog, QMessageBox, QCheckBox, QSplitter)
+from PySide6.QtCore import Qt
 from .gallery_view import GalleryView
 from .tag_panel import TagPanel
 from .data_model import DataModel
@@ -52,22 +52,33 @@ class TagEditorTab(QWidget):
         
         layout.addLayout(top_layout)
 
-        # Split view
-        split_layout = QHBoxLayout()
-        
-        # Gallery
-        self.gallery = GalleryView()
-        split_layout.addWidget(self.gallery, 1)
-        
-        # Tag panel
-        self.tag_panel = TagPanel()
-        split_layout.addWidget(self.tag_panel, 1)
-
-        # Add status label
+        # Add status label — fixed height so it never shifts the layout below it
         self.status_label = QLabel()
+        self.status_label.setFixedHeight(18)
+        self.status_label.setStyleSheet("color: gray; font-size: 11px;")
         layout.addWidget(self.status_label)
-        
-        layout.addLayout(split_layout)
+
+        # Split view — draggable divider between gallery and tag panel
+        self.splitter = QSplitter(Qt.Horizontal)
+
+        self.gallery = GalleryView()
+        self.tag_panel = TagPanel()
+
+        self.splitter.addWidget(self.gallery)
+        self.splitter.addWidget(self.tag_panel)
+
+        # Thumbnail is 150px wide + 5px spacing = 155px per column
+        # Min: 1 column (~160px), Max: 5 columns (~780px)
+        self.splitter.setCollapsible(0, False)
+        self.splitter.setCollapsible(1, False)
+        self.gallery.setMinimumWidth(160)
+        self.gallery.setMaximumWidth(780)
+        self.tag_panel.setMinimumWidth(260)
+
+        # Give gallery a bit more space by default
+        self.splitter.setSizes([600, 400])
+
+        layout.addWidget(self.splitter)
 
         # Connect signals
         self.browse_btn.clicked.connect(self.browse_folder)
@@ -84,13 +95,16 @@ class TagEditorTab(QWidget):
 
     def on_image_selected(self, image_path: str):
         """Handle image selection"""
-        if image_path:  # Only process if an image is actually selected
+        if image_path:
             image_data = self.data_model.images.get(image_path)
             if image_data:
                 caption = ', '.join(image_data.tags)
                 self.tag_panel.set_caption(image_path, caption)
         else:
-            self.tag_panel.clear()
+            # Returning to grid — only clear the caption editor,
+            # leave the tag list and filters untouched
+            self.tag_panel.caption_tab.clear()
+            self.tag_panel.tab_widget.setCurrentWidget(self.tag_panel.filter_tab)
 
     def on_caption_changed(self, image_path: str, new_caption: str):
         """Handle caption changes"""

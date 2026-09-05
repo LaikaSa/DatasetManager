@@ -6,7 +6,8 @@ import numpy as np
 import io
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
                               QFileDialog, QMessageBox, QProgressBar, QCheckBox,
-                              QSlider, QHBoxLayout, QGroupBox, QScrollArea, QLineEdit)
+                              QSlider, QHBoxLayout, QGroupBox, QScrollArea, QLineEdit,
+                              QApplication)
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from PySide6.QtGui import QPixmap, QImage
 from send2trash import send2trash
@@ -136,10 +137,11 @@ class ClickableImageContainer(QWidget):
         self.img_label.setAlignment(Qt.AlignCenter)
         self.img_label.setMinimumSize(200, 200)
 
-        # Resolution label
+        # Resolution label with file type
         with Image.open(self.img_path) as img:
             width, height = img.size
-        self.resolution_label = QLabel(f"{width} × {height}")
+        ext = os.path.splitext(self.img_path)[1].lower()
+        self.resolution_label = QLabel(f"{width} × {height} ({ext})")
         self.resolution_label.setAlignment(Qt.AlignCenter)
 
         layout.addWidget(self.img_label)
@@ -169,6 +171,33 @@ class ClickableImageContainer(QWidget):
             self.is_selected = not self.is_selected
             self.update_style()
             self.callback(self.img_path, self.is_selected)
+        elif event.button() == Qt.RightButton:
+            self.show_context_menu(event.globalPos())
+
+    def show_context_menu(self, global_pos):
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        open_action = menu.addAction("Open in Folder")
+        action = menu.exec(global_pos)
+        if action == open_action:
+            self.open_in_folder()
+
+    def open_in_folder(self):
+        import ctypes
+        normalized = os.path.normpath(self.img_path)
+        shell32 = ctypes.windll.shell32
+        shell32.ILCreateFromPathW.argtypes = [ctypes.c_wchar_p]
+        shell32.ILCreateFromPathW.restype = ctypes.c_void_p
+        shell32.SHOpenFolderAndSelectItems.argtypes = [
+            ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_ulong
+        ]
+        shell32.SHOpenFolderAndSelectItems.restype = ctypes.HRESULT
+        shell32.ILFree.argtypes = [ctypes.c_void_p]
+        shell32.ILFree.restype = None
+        pidl = shell32.ILCreateFromPathW(normalized)
+        if pidl:
+            shell32.SHOpenFolderAndSelectItems(pidl, 0, None, 0)
+            shell32.ILFree(pidl)
 
     def update_style(self):
         if self.is_selected:
@@ -306,6 +335,92 @@ class WorkerThread(QThread):
     def stop(self):
         self.is_running = False
 
+class CompareWindow(QWidget):
+    def __init__(self, image_paths, parent=None):
+        super().__init__(parent)
+        self.image_paths = image_paths
+        self.setWindowTitle("Compare Images")
+        self.showMaximized()
+        self.init_ui()
+
+    def init_ui(self):
+        from PySide6.QtWidgets import QSizePolicy
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        # Scroll area so images don't get cut off if there are many
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+
+        container = QWidget()
+        images_layout = QHBoxLayout(container)
+        images_layout.setSpacing(8)
+
+        screen = QApplication.primaryScreen().availableGeometry()
+        available_w = screen.width() - 40
+        available_h = screen.height() - 100
+        n = len(self.image_paths)
+        max_w_each = max(1, available_w // n) - 8
+
+        for img_path in self.image_paths:
+            col = QWidget()
+            col_layout = QVBoxLayout(col)
+            col_layout.setContentsMargins(0, 0, 0, 0)
+            col_layout.setSpacing(4)
+
+            try:
+                with Image.open(img_path) as img:
+                    orig_w, orig_h = img.size
+                ext = os.path.splitext(img_path)[1].lower()
+
+                # Scale to fit, honouring both max_w_each and available_h
+                ratio = min(max_w_each / orig_w, (available_h - 40) / orig_h, 1.0)
+                disp_w = int(orig_w * ratio)
+                disp_h = int(orig_h * ratio)
+
+                pixmap = QPixmap(img_path).scaled(
+                    disp_w, disp_h,
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
+                img_label = QLabel()
+                img_label.setPixmap(pixmap)
+                img_label.setAlignment(Qt.AlignCenter)
+
+                info_label = QLabel(
+                    f"{os.path.basename(img_path)}\n"
+                    f"{orig_w} × {orig_h} ({ext})"
+                )
+                info_label.setAlignment(Qt.AlignCenter)
+                info_label.setWordWrap(True)
+
+            except Exception as e:
+                img_label = QLabel(f"Error loading image:\n{str(e)}")
+                img_label.setAlignment(Qt.AlignCenter)
+                info_label = QLabel(os.path.basename(img_path))
+                info_label.setAlignment(Qt.AlignCenter)
+
+            col_layout.addWidget(img_label)
+            col_layout.addWidget(info_label)
+            col.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+            images_layout.addWidget(col)
+
+        images_layout.addStretch()
+        scroll.setWidget(container)
+        layout.addWidget(scroll)
+
+        close_btn = QPushButton("Close")
+        close_btn.setFixedWidth(120)
+        close_btn.clicked.connect(self.close)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(close_btn)
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
 class DuplicateDetectorTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -407,15 +522,19 @@ class DuplicateDetectorTab(QWidget):
         self.start_btn.setEnabled(False)
         self.stop_btn = QPushButton("Stop Detection")
         self.stop_btn.setEnabled(False)
-        self.recycle_btn = QPushButton("Move Selected to Recycle Bin")  # Add this
-        self.recycle_btn.setEnabled(False)  # Add this
-        
+        self.compare_btn = QPushButton("Compare")
+        self.compare_btn.setEnabled(False)
+        self.recycle_btn = QPushButton("Move Selected to Recycle Bin")
+        self.recycle_btn.setEnabled(False)
+
         button_layout.addWidget(self.start_btn)
         button_layout.addWidget(self.stop_btn)
-        button_layout.addWidget(self.recycle_btn)  # Add this
+        button_layout.addWidget(self.compare_btn)
+        button_layout.addWidget(self.recycle_btn)
 
-        # Connect the recycle bin button
+        # Connect buttons
         self.recycle_btn.clicked.connect(self.move_to_recycle_bin)
+        self.compare_btn.clicked.connect(self.open_compare_window)
 
         # Preview area
         self.preview_area = QScrollArea()
@@ -473,6 +592,14 @@ class DuplicateDetectorTab(QWidget):
         self.preview_area.setWidget(preview_widget)
         self.update_navigation_buttons()
         self.recycle_btn.setEnabled(len(self.selected_images) > 0)
+        self.compare_btn.setEnabled(True)
+
+    def open_compare_window(self):
+        if not self.image_groups:
+            return
+        group = self.image_groups[self.current_group_index]
+        self.compare_window = CompareWindow(group['images'])
+        self.compare_window.show()
 
     def on_selection_changed(self, img_path, is_selected):
         if is_selected:
@@ -668,4 +795,5 @@ class DuplicateDetectorTab(QWidget):
         else:
             self.prev_btn.setEnabled(False)
             self.next_btn.setEnabled(False)
+            self.compare_btn.setEnabled(False)
             self.group_label.setText("No duplicates found")

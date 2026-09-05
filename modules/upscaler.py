@@ -6,7 +6,8 @@ from PIL import Image
 import datetime
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel, QSpinBox,
                               QFileDialog, QTabWidget, QHBoxLayout, QCheckBox,
-                              QDoubleSpinBox, QLineEdit, QScrollArea, QListWidget)
+                              QDoubleSpinBox, QLineEdit, QScrollArea, QListWidget,
+                              QListWidgetItem)
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 import requests
@@ -277,262 +278,197 @@ class DragDropMixin:
             event.accept()
         else:
             event.ignore()
-
-class SingleImageTab(QWidget):
+            
+class InputWidget(QWidget):
     def __init__(self, parent):
         super().__init__()
         self.parent = parent
+        self.selected_paths = []
+        self.setAcceptDrops(True)
         self.init_ui()
 
     def init_ui(self):
-        layout = QVBoxLayout()
-        
-        # Input selection
-        input_layout = QHBoxLayout()
-        self.input_path = QLineEdit()
-        self.input_path.setPlaceholderText("Select an image file or drag & drop anywhere")
-        self.browse_btn = QPushButton("Browse")
-        input_layout.addWidget(self.input_path)
-        input_layout.addWidget(self.browse_btn)
-        
-        self.browse_btn.clicked.connect(self.browse_file)
-        self.input_path.textChanged.connect(lambda: self.parent.check_input(self.input_path.text()))
-        
-        layout.addLayout(input_layout)
-        layout.addStretch()
-        self.setLayout(layout)
+        layout = QVBoxLayout(self)
 
+        # Path input row
+        path_layout = QHBoxLayout()
+        self.path_input = QLineEdit()
+        self.path_input.setPlaceholderText("Enter image path or folder path, or drag & drop here...")
+        self.browse_file_btn = QPushButton("Browse File")
+        self.browse_folder_btn = QPushButton("Browse Folder")
+        path_layout.addWidget(self.path_input)
+        path_layout.addWidget(self.browse_file_btn)
+        path_layout.addWidget(self.browse_folder_btn)
+
+        # Info label
+        self.info_label = QLabel("No input selected")
+        self.info_label.setAlignment(Qt.AlignCenter)
+
+        # File list
+        self.file_list = QListWidget()
+        self.file_list.setMinimumHeight(180)
+        self.file_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.file_list.customContextMenuRequested.connect(self.show_context_menu)
+        self.file_list.setUniformItemSizes(True)
+
+        self.browse_file_btn.clicked.connect(self.browse_file)
+        self.browse_folder_btn.clicked.connect(self.browse_folder)
+        self.path_input.textChanged.connect(self.on_path_changed)
+
+        layout.addLayout(path_layout)
+        layout.addWidget(self.info_label)
+        layout.addWidget(self.file_list)
+
+    # ── path typing / pasting ──────────────────────────────────────────────
+    def on_path_changed(self, text):
+        text = text.strip()
+        if not text:
+            self.selected_paths = []
+            self.refresh_list()
+            self.parent.check_input()
+            return
+        if os.path.isfile(text) and text.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+            self.selected_paths = [text]
+            self.refresh_list()
+            self.parent.check_input()
+        elif os.path.isdir(text):
+            self.load_folder(text)
+
+    # ── browse buttons ─────────────────────────────────────────────────────
     def browse_file(self):
         path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Image",
-            "",
+            self, "Select Image", "",
             "Images (*.png *.jpg *.jpeg *.bmp)"
         )
         if path:
-            self.input_path.setText(path)
-
-    def get_input_paths(self):
-        path = self.input_path.text().strip()
-        return [path] if path else []
-
-    def handle_dropped_files(self, files):
-        if files:
-            self.input_path.setText(files[0])  # Take only the first file for single image tab
-
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
-            urls = event.mimeData().urls()
-            if len(urls) == 1:  # Only accept one file for single image tab
-                path = urls[0].toLocalFile()
-                if os.path.isfile(path) and path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                    event.accept()
-                    self.drop_label.setStyleSheet("""
-                        QLabel {
-                            border: 2px dashed #4CAF50;
-                            border-radius: 5px;
-                            padding: 20px;
-                            background: #E8F5E9;
-                        }
-                    """)
-                    return
-        event.ignore()
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
-            event.accept()
-        else:
-            event.ignore()
-
-    def dragLeaveEvent(self, event):
-        self.drop_label.setStyleSheet("""
-            QLabel {
-                border: 2px dashed #aaa;
-                border-radius: 5px;
-                padding: 20px;
-                background: #f0f0f0;
-            }
-        """)
-
-    def dropEvent(self, event: QDropEvent):
-        if event.mimeData().hasUrls():
-            url = event.mimeData().urls()[0]
-            path = url.toLocalFile()
-            if os.path.isfile(path) and path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                self.input_path.setText(path)
-                event.accept()
-        
-        self.drop_label.setStyleSheet("""
-            QLabel {
-                border: 2px dashed #aaa;
-                border-radius: 5px;
-                padding: 20px;
-                background: #f0f0f0;
-            }
-        """)
-
-class MultipleImagesTab(QWidget):
-    def __init__(self, parent):
-        super().__init__()
-        self.parent = parent
-        self.init_ui()
-        self.selected_paths = []
-        self.is_folder = False
-
-    def init_ui(self):
-        layout = QVBoxLayout()
-        
-        # Directory input layout
-        dir_layout = QHBoxLayout()
-        self.dir_input = QLineEdit()
-        self.dir_input.setPlaceholderText("Enter directory path or drag & drop anywhere")
-        self.dir_input.textChanged.connect(self.handle_dir_input)
-        dir_layout.addWidget(self.dir_input)
-        
-        # Buttons layout
-        button_layout = QHBoxLayout()
-        self.browse_files_btn = QPushButton("Select Files")
-        self.browse_folder_btn = QPushButton("Select Folder")
-        button_layout.addWidget(self.browse_files_btn)
-        button_layout.addWidget(self.browse_folder_btn)
-        
-        # Selected files info
-        self.info_label = QLabel("No files selected")
-        self.info_label.setAlignment(Qt.AlignCenter)
-        
-        # File list widget
-        self.file_list = QListWidget()
-        self.file_list.setMinimumHeight(200)
-        self.file_list.setStyleSheet("""
-            QListWidget {
-                border: 1px solid #aaa;
-                border-radius: 4px;
-                background-color: #ffffff;
-                padding: 5px;
-            }
-            QListWidget::item {
-                padding: 5px;
-                border-bottom: 1px solid #eee;
-            }
-            QListWidget::item:selected {
-                background-color: #e0e0e0;
-                color: black;
-            }
-            QListWidget::item:hover {
-                background-color: #f0f0f0;
-            }
-        """)
-        
-        # Connect buttons
-        self.browse_files_btn.clicked.connect(self.browse_files)
-        self.browse_folder_btn.clicked.connect(self.browse_folder)
-        
-        # Add widgets to layout
-        layout.addLayout(dir_layout)
-        layout.addLayout(button_layout)
-        layout.addWidget(self.info_label)
-        layout.addWidget(self.file_list)
-        
-        self.setLayout(layout)
-
-    def filter_by_resolution(self, paths, max_resolution):
-        filtered_paths = []
-        for path in paths:
-            try:
-                with Image.open(path) as img:
-                    width, height = img.size
-                    if width < max_resolution and height < max_resolution:
-                        filtered_paths.append(path)
-            except Exception as e:
-                logger.error(f"Error checking image {path}: {str(e)}")
-        return filtered_paths
-
-    def handle_dir_input(self):
-        path = self.dir_input.text().strip()
-        if os.path.exists(path):
-            if os.path.isfile(path) and path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                self.selected_paths = [path]
-                self.is_folder = False
-                self.update_file_list()
-                self.parent.check_input(path)
-            elif os.path.isdir(path):
-                self.process_directory(path)
-
-    def process_directory(self, directory):
-        files = []
-        # Only process files in the root directory, not in subfolders
-        for filename in os.listdir(directory):
-            file_path = os.path.join(directory, filename)
-            if os.path.isfile(file_path) and filename.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                files.append(file_path)
-        
-        if files:
-            self.selected_paths = files
-            self.is_folder = True
-            self.update_file_list()
-            self.parent.check_input(files[0])
-
-    def update_file_list(self):
-        self.file_list.clear()
-        paths_to_show = self.selected_paths
-        
-        # If resolution filter is enabled, filter the paths
-        if self.parent.resolution_check.isChecked():
-            max_resolution = self.parent.resolution_spin.value()
-            paths_to_show = self.filter_by_resolution(self.selected_paths, max_resolution)
-            
-            # Update info label with filtered count
-            total = len(self.selected_paths)
-            filtered = len(paths_to_show)
-            self.info_label.setText(f"{filtered}/{total} files selected (under {max_resolution}x{max_resolution})")
-        else:
-            self.info_label.setText(f"{len(paths_to_show)} files selected")
-
-        for path in paths_to_show:
-            item_text = f"{os.path.basename(path)} ({os.path.dirname(path)})"
-            self.file_list.addItem(item_text)
-
-    def handle_dropped_files(self, files):
-        if files:
-            if len(files) == 1 and os.path.isdir(files[0]):
-                self.dir_input.setText(files[0])
-            self.selected_paths = files
-            self.update_file_list()
-            self.parent.check_input(files[0])
-
-    def browse_files(self):
-        files, _ = QFileDialog.getOpenFileNames(
-            self,
-            "Select Images",
-            "",
-            "Images (*.png *.jpg *.jpeg *.bmp)"
-        )
-        if files:
-            self.selected_paths = files
-            self.is_folder = False
-            self.update_file_list()
-            self.parent.check_input(files[0])
+            self.path_input.setText(path)
 
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Folder")
         if folder:
-            self.dir_input.setText(folder)
-            self.process_directory(folder)
+            self.path_input.setText(folder)
 
+    # ── folder loading ─────────────────────────────────────────────────────
+    def load_folder(self, folder):
+        files = [
+            os.path.join(folder, f) for f in os.listdir(folder)
+            if os.path.isfile(os.path.join(folder, f))
+            and f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))
+        ]
+        self.selected_paths = sorted(files)
+        self.refresh_list()
+        self.parent.check_input()
+
+    # ── list display ───────────────────────────────────────────────────────
+    def refresh_list(self):
+        self.file_list.clear()
+        paths = self.selected_paths
+
+        # Apply resolution filter if active
+        if self.parent.resolution_check.isChecked():
+            max_res = self.parent.resolution_spin.value()
+            paths = self.filter_by_resolution(paths, max_res)
+            self.info_label.setText(
+                f"{len(paths)}/{len(self.selected_paths)} files "
+                f"(under {max_res} px)"
+            )
+        else:
+            count = len(paths)
+            if count == 1:
+                self.info_label.setText(f"1 file selected: {os.path.basename(paths[0])}")
+            else:
+                self.info_label.setText(f"{count} files selected")
+
+        for p in paths:
+            try:
+                with Image.open(p) as img:
+                    w, h = img.size
+                res_str = f"{w}×{h}"
+            except Exception:
+                res_str = "?"
+
+            # Build a row widget: filename left, resolution right
+            row_widget = QWidget()
+            row_layout = QHBoxLayout(row_widget)
+            row_layout.setContentsMargins(4, 2, 4, 2)
+            row_layout.setSpacing(0)
+
+            name_label = QLabel(os.path.basename(p))
+            name_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+
+            res_label = QLabel(f"[{res_str}]")
+            res_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            res_label.setStyleSheet("color: #555555;")
+
+            row_layout.addWidget(name_label)
+            row_layout.addStretch()
+            row_layout.addWidget(res_label)
+
+            item = QListWidgetItem(self.file_list)
+            item.setSizeHint(row_widget.sizeHint())
+            self.file_list.addItem(item)
+            self.file_list.setItemWidget(item, row_widget)
+
+    def filter_by_resolution(self, paths, max_res):
+        out = []
+        for p in paths:
+            try:
+                with Image.open(p) as img:
+                    w, h = img.size
+                    if w < max_res and h < max_res:
+                        out.append(p)
+            except Exception:
+                pass
+        return out
+
+    # ── called by parent when resolution filter changes ────────────────────
+    def update_list(self):
+        self.refresh_list()
+
+    def show_context_menu(self, pos):
+        from PySide6.QtWidgets import QMenu
+        item = self.file_list.itemAt(pos)
+        if item is None:
+            return
+        menu = QMenu(self)
+        open_action = menu.addAction("Open in Folder")
+        action = menu.exec(self.file_list.mapToGlobal(pos))
+        if action == open_action:
+            self.open_in_folder(item)
+
+    def open_in_folder(self, item):
+        import ctypes
+        row = self.file_list.row(item)
+        paths = self.selected_paths
+        if self.parent.resolution_check.isChecked():
+            paths = self.filter_by_resolution(paths, self.parent.resolution_spin.value())
+        if row < len(paths):
+            normalized = os.path.normpath(paths[row])
+            shell32 = ctypes.windll.shell32
+            shell32.ILCreateFromPathW.argtypes = [ctypes.c_wchar_p]
+            shell32.ILCreateFromPathW.restype = ctypes.c_void_p
+            shell32.SHOpenFolderAndSelectItems.argtypes = [
+                ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_ulong
+            ]
+            shell32.SHOpenFolderAndSelectItems.restype = ctypes.HRESULT
+            shell32.ILFree.argtypes = [ctypes.c_void_p]
+            shell32.ILFree.restype = None
+            pidl = shell32.ILCreateFromPathW(normalized)
+            if pidl:
+                shell32.SHOpenFolderAndSelectItems(pidl, 0, None, 0)
+                shell32.ILFree(pidl)
+
+    # ── what the worker actually processes ────────────────────────────────
     def get_input_paths(self):
-        return self.selected_paths
+        paths = self.selected_paths
+        if self.parent.resolution_check.isChecked():
+            paths = self.filter_by_resolution(paths, self.parent.resolution_spin.value())
+        return paths
 
-    def dragEnterEvent(self, event: QDragEnterEvent):
+    # ── drag & drop ────────────────────────────────────────────────────────
+    def dragEnterEvent(self, event):
         if event.mimeData().hasUrls():
             event.accept()
-            self.drop_label.setStyleSheet("""
-                QLabel {
-                    border: 2px dashed #4CAF50;
-                    border-radius: 5px;
-                    padding: 20px;
-                    background: #E8F5E9;
-                }
-            """)
         else:
             event.ignore()
 
@@ -542,44 +478,38 @@ class MultipleImagesTab(QWidget):
         else:
             event.ignore()
 
-    def dragLeaveEvent(self, event):
-        self.drop_label.setStyleSheet("""
-            QLabel {
-                border: 2px dashed #aaa;
-                border-radius: 5px;
-                padding: 20px;
-                background: #f0f0f0;
-            }
-        """)
+    def dropEvent(self, event):
+        urls = event.mimeData().urls()
+        if not urls:
+            return
 
-    def dropEvent(self, event: QDropEvent):
-        files = []
-        for url in event.mimeData().urls():
-            path = url.toLocalFile()
-            if os.path.isfile(path) and path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                files.append(path)
-            elif os.path.isdir(path):
-                # If it's a folder, set it in the directory input
-                self.dir_input.setText(path)
-                # Process directory will handle adding the files (root folder only)
-                self.process_directory(path)
-                event.accept()
-                return
-        
+        # Single folder drop
+        first = urls[0].toLocalFile()
+        if len(urls) == 1 and os.path.isdir(first):
+            self.path_input.setText(first)
+            event.accept()
+            return
+
+        # One or more files
+        files = [
+            u.toLocalFile() for u in urls
+            if os.path.isfile(u.toLocalFile())
+            and u.toLocalFile().lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))
+        ]
         if files:
             self.selected_paths = files
-            self.update_file_list()
-            self.parent.check_input(files[0])
+            # Show the first path (or parent folder) in the text box
+            if len(files) == 1:
+                self.path_input.blockSignals(True)
+                self.path_input.setText(files[0])
+                self.path_input.blockSignals(False)
+            else:
+                self.path_input.blockSignals(True)
+                self.path_input.setText(os.path.dirname(files[0]))
+                self.path_input.blockSignals(False)
+            self.refresh_list()
+            self.parent.check_input()
             event.accept()
-        
-        self.drop_label.setStyleSheet("""
-            QLabel {
-                border: 2px dashed #aaa;
-                border-radius: 5px;
-                padding: 20px;
-                background: #f0f0f0;
-            }
-        """)
 
 class UpscalerTab(QWidget):
     def __init__(self):
@@ -589,20 +519,15 @@ class UpscalerTab(QWidget):
         self.init_ui()
 
     def init_ui(self):
-        layout = QVBoxLayout()
+        layout = QVBoxLayout(self)
 
-        # Create sub-tabs
-        self.tabs = QTabWidget()
-        self.single_tab = SingleImageTab(self)
-        self.multiple_tab = MultipleImagesTab(self)
-        
-        self.tabs.addTab(self.single_tab, "Single Image")
-        self.tabs.addTab(self.multiple_tab, "Multiple Images")
+        # Single unified input widget
+        self.input_widget = InputWidget(self)
+        layout.addWidget(self.input_widget)
 
-        # Scale and resolution controls
+        # Scale + resolution controls
         controls_layout = QHBoxLayout()
-        
-        # Scale selection
+
         scale_layout = QHBoxLayout()
         scale_layout.addWidget(QLabel("Scale factor:"))
         self.scale_spin = QDoubleSpinBox()
@@ -612,43 +537,45 @@ class UpscalerTab(QWidget):
         self.scale_spin.setDecimals(1)
         self.scale_spin.setSuffix('x')
         scale_layout.addWidget(self.scale_spin)
-        
-        # Resolution filter
+
         resolution_layout = QHBoxLayout()
         self.resolution_check = QCheckBox("Only upscale images smaller than:")
         self.resolution_spin = QSpinBox()
         self.resolution_spin.setRange(1, 10000)
         self.resolution_spin.setValue(1024)
         self.resolution_spin.setSuffix(' px')
-        self.resolution_spin.setEnabled(False)  # Disabled by default
+        self.resolution_spin.setEnabled(False)
+        self.resolution_check.stateChanged.connect(self.toggle_resolution_filter)
+        self.resolution_spin.valueChanged.connect(self.input_widget.update_list)
         resolution_layout.addWidget(self.resolution_check)
         resolution_layout.addWidget(self.resolution_spin)
-        
-        # Connect resolution filter changes
-        self.resolution_check.stateChanged.connect(self.toggle_resolution_filter)
-        self.resolution_spin.valueChanged.connect(self.update_file_list)
-        
-        # Add all controls to the controls layout
+
         controls_layout.addLayout(scale_layout)
-        controls_layout.addSpacing(20)  # Add some space between controls
+        controls_layout.addSpacing(20)
         controls_layout.addLayout(resolution_layout)
         controls_layout.addStretch()
+        layout.addLayout(controls_layout)
 
-        # Model download section
+        # Model row
         model_layout = QHBoxLayout()
         self.model_status = QLabel("Model not downloaded")
         self.download_btn = QPushButton("Download Model")
+        self.download_btn.clicked.connect(self.download_model)
         model_layout.addWidget(self.model_status)
         model_layout.addWidget(self.download_btn)
+        layout.addLayout(model_layout)
 
-        # Control buttons
+        # Action buttons
         button_layout = QHBoxLayout()
         self.start_btn = QPushButton("Start Upscaling")
         self.stop_btn = QPushButton("Stop")
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(False)
+        self.start_btn.clicked.connect(self.start_upscale)
+        self.stop_btn.clicked.connect(self.stop_upscale)
         button_layout.addWidget(self.start_btn)
         button_layout.addWidget(self.stop_btn)
+        layout.addLayout(button_layout)
 
         # Status area
         self.status_area = QScrollArea()
@@ -658,75 +585,49 @@ class UpscalerTab(QWidget):
         self.status_text.setWordWrap(True)
         self.status_area.setWidget(self.status_text)
         self.status_area.setMinimumHeight(200)
-
-        # Add all layouts
-        layout.addWidget(self.tabs)
-        layout.addLayout(controls_layout)
-        layout.addLayout(model_layout)
-        layout.addLayout(button_layout)
         layout.addWidget(self.status_area)
 
-        # Connect signals
-        self.download_btn.clicked.connect(self.download_model)
-        self.start_btn.clicked.connect(self.start_upscale)
-        self.stop_btn.clicked.connect(self.stop_upscale)
-
-        self.setLayout(layout)
         self.check_model()
 
-    def update_file_list(self):
-        if isinstance(self.tabs.currentWidget(), MultipleImagesTab):
-            self.multiple_tab.update_file_list()
+    def toggle_resolution_filter(self, state):
+        self.resolution_spin.setEnabled(bool(state))
+        self.input_widget.update_list()
 
     def check_model(self):
-        # Get project root directory (two levels up from the module file)
         root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         model_dir = os.path.join(root_dir, "models")
-        model_filename = "RealESRGAN_x4plus_anime_6B.pth"
-        self.model_path = os.path.join(model_dir, model_filename)
-        
+        self.model_path = os.path.join(model_dir, "RealESRGAN_x4plus_anime_6B.pth")
         if os.path.exists(self.model_path):
             self.model_status.setText("Model ready")
             self.download_btn.setEnabled(False)
-            self.check_input("")  # Initialize with empty string
         else:
             self.model_status.setText("Model not downloaded")
             self.download_btn.setEnabled(True)
             self.start_btn.setEnabled(False)
 
-    def check_input(self, path):
+    def check_input(self):
         if os.path.exists(self.model_path):
-            current_tab = self.tabs.currentWidget()
-            input_paths = current_tab.get_input_paths()
-            self.start_btn.setEnabled(len(input_paths) > 0)
+            self.start_btn.setEnabled(len(self.input_widget.get_input_paths()) > 0)
         else:
             self.start_btn.setEnabled(False)
-
-    def toggle_resolution_filter(self, state):
-        self.resolution_spin.setEnabled(bool(state))  # Convert state to boolean
-        self.update_file_list()
 
     def download_model(self):
         self.download_btn.setEnabled(False)
         self.model_status.setText("Downloading model...")
-        
         try:
             url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth"
             root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             model_dir = os.path.join(root_dir, "models")
             os.makedirs(model_dir, exist_ok=True)
-            
             response = requests.get(url, stream=True)
             response.raise_for_status()
-            
             with open(self.model_path, 'wb') as f:
                 for chunk in response.iter_content(chunk_size=8192):
                     if chunk:
                         f.write(chunk)
-            
             self.model_status.setText("Model ready")
-            self.check_input("")
-            
+            self.download_btn.setEnabled(False)
+            self.check_input()
         except Exception as e:
             self.model_status.setText(f"Download failed: {str(e)}")
             self.download_btn.setEnabled(True)
@@ -734,81 +635,46 @@ class UpscalerTab(QWidget):
     def start_upscale(self):
         if self.worker is not None and self.worker.isRunning():
             return
-
-        current_tab = self.tabs.currentWidget()
-        if isinstance(current_tab, MultipleImagesTab) and self.resolution_check.isChecked():
-            # Get filtered paths for multiple images tab when resolution filter is enabled
-            max_resolution = self.resolution_spin.value()
-            input_paths = current_tab.filter_by_resolution(current_tab.get_input_paths(), max_resolution)
-        else:
-            input_paths = current_tab.get_input_paths()
-        
+        input_paths = self.input_widget.get_input_paths()
         if not input_paths:
             self.update_status("No input files selected")
             return
 
-        scale_factor = self.scale_spin.value()
-
-        self.worker = UpscaleWorker(
-            input_paths, 
-            self.model_path, 
-            scale_factor
-        )
+        self.worker = UpscaleWorker(input_paths, self.model_path, self.scale_spin.value())
         self.worker.status.connect(self.update_status)
         self.worker.finished.connect(self.upscale_finished)
 
-        # Disable UI controls
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
-        self.tabs.setEnabled(False)
+        self.input_widget.setEnabled(False)
         self.scale_spin.setEnabled(False)
         self.resolution_check.setEnabled(False)
         self.resolution_spin.setEnabled(False)
         self.status_text.setText("")
-        
         self.worker.start()
 
     def stop_upscale(self):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
             self.worker.wait()
+            self.worker.clear_gpu_memory()
             self.upscale_finished()
 
     def upscale_finished(self):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
-        self.tabs.setEnabled(True)
+        self.input_widget.setEnabled(True)
         self.scale_spin.setEnabled(True)
         self.resolution_check.setEnabled(True)
-        self.resolution_spin.setEnabled(True)
-
-    def stop_upscale(self):
-        if self.worker and self.worker.isRunning():
-            self.worker.stop()
-            self.worker.wait()
-            self.worker.clear_gpu_memory()  # Make sure to clear memory when stopping
-            self.upscale_finished()
+        if self.resolution_check.isChecked():
+            self.resolution_spin.setEnabled(True)
 
     def update_status(self, text):
         if "Finished" in text:
-            formatted_text = f"<p style='color: green; font-weight: bold;'>{text}</p>"
+            formatted = f"<p style='color:green;font-weight:bold;'>{text}</p>"
         elif "Error" in text:
-            formatted_text = f"<p style='color: red; font-weight: bold;'>{text}</p>"
+            formatted = f"<p style='color:red;font-weight:bold;'>{text}</p>"
         else:
-            formatted_text = f"<p>{text}</p>"
-
-        current_text = self.status_text.text()
-        self.status_text.setText(current_text + formatted_text if current_text else formatted_text)
-
-    def upscale_finished(self):
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.tabs.setEnabled(True)
-        self.scale_spin.setEnabled(True)
-
-    def stop_upscale(self):
-        if self.worker and self.worker.isRunning():
-            self.worker.stop()
-            self.worker.wait()
-            self.worker.clear_gpu_memory()  # Now this method exists
-            self.upscale_finished()
+            formatted = f"<p>{text}</p>"
+        current = self.status_text.text()
+        self.status_text.setText(current + formatted if current else formatted)

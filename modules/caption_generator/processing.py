@@ -1,6 +1,7 @@
 from PySide6.QtCore import QThread, Signal
 import numpy as np
 import os
+import threading
 import torch
 from PIL import Image
 from .utils import ProgressBar
@@ -12,6 +13,7 @@ class CaptionGeneratorThread(QThread):
     caption_generated = Signal(str, str)
     process_completed = Signal()
     error_occurred = Signal(str)
+    stopped = Signal()
 
     def __init__(self, captioner, folder_path, include_rating=False, 
                  remove_underscore=True, recursive=False, 
@@ -32,6 +34,13 @@ class CaptionGeneratorThread(QThread):
         self.character_threshold = character_threshold
         self.batch_size = batch_size
         self.worker_count = worker_count
+        self._stop_event = threading.Event()
+
+    def request_stop(self):
+        self._stop_event.set()
+
+    def _should_stop(self):
+        return self._stop_event.is_set()
 
     def run(self):
         try:
@@ -43,6 +52,11 @@ class CaptionGeneratorThread(QThread):
             progress = ProgressBar(total_files, prefix='Processing: ')
 
             for i, image_path in enumerate(image_files, 1):
+                if self._should_stop():
+                    logger.info("Caption generation stopped by user")
+                    self.stopped.emit()
+                    return
+
                 try:
                     # Generate new caption
                     caption = self.captioner.generate_caption(

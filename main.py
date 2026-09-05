@@ -8,6 +8,7 @@ from modules.upscaler import UpscalerTab
 from modules.logger import setup_logger
 from modules.caption_generator import CaptionGeneratorTab
 from modules.tag_editor import TagEditorTab
+from modules.Conversion_Tools import ConversionTab
 import os  # Add this for path operations
 logger = setup_logger()
 
@@ -29,6 +30,7 @@ class MainWindow(QMainWindow):
         self.upscaler_tab = UpscalerTab()
         self.caption_tab = CaptionGeneratorTab()
         self.tag_editor_tab = TagEditorTab()
+        self.conversion_tab = ConversionTab()
 
         # Add tabs
         self.tabs.addTab(self.duplicate_tab, "Duplicate Detection")
@@ -36,6 +38,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.upscaler_tab, "Upscaler")
         self.tabs.addTab(self.caption_tab, "Caption Generator")
         self.tabs.addTab(self.tag_editor_tab, "Tags Editor")
+        self.tabs.addTab(self.conversion_tab, "Conversion Tools")
         
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():

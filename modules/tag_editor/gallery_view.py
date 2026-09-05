@@ -4,6 +4,31 @@ from PySide6.QtCore import Qt, Signal
 from .data_model import ImageData
 from PySide6.QtGui import QPixmap
 
+def _open_in_explorer_selected(path):
+    """Open folder in Explorer with the file highlighted and scrolled into view."""
+    import ctypes
+    import os
+    normalized = os.path.normpath(path)
+    shell32 = ctypes.windll.shell32
+
+    # Must set restype to c_void_p or the 64-bit pointer gets truncated to 32-bit
+    shell32.ILCreateFromPathW.argtypes = [ctypes.c_wchar_p]
+    shell32.ILCreateFromPathW.restype = ctypes.c_void_p
+
+    shell32.SHOpenFolderAndSelectItems.argtypes = [
+        ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_ulong
+    ]
+    shell32.SHOpenFolderAndSelectItems.restype = ctypes.HRESULT
+
+    shell32.ILFree.argtypes = [ctypes.c_void_p]
+    shell32.ILFree.restype = None
+
+    pidl = shell32.ILCreateFromPathW(normalized)
+    if pidl:
+        shell32.SHOpenFolderAndSelectItems(pidl, 0, None, 0)
+        shell32.ILFree(pidl)
+
+
 class ThumbnailWidget(QLabel):
     clicked = Signal(str)
 
@@ -28,6 +53,19 @@ class ThumbnailWidget(QLabel):
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.image_path)
+        elif event.button() == Qt.MouseButton.RightButton:
+            self.show_context_menu(event.globalPos())
+
+    def show_context_menu(self, global_pos):
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        open_action = menu.addAction("Open in Folder")
+        action = menu.exec(global_pos)
+        if action == open_action:
+            self.open_in_folder()
+
+    def open_in_folder(self):
+        _open_in_explorer_selected(self.image_path)
 
 class FullImageView(QWidget):
     closed = Signal()
@@ -71,6 +109,18 @@ class FullImageView(QWidget):
             Qt.TransformationMode.SmoothTransformation
         )
         self.image_label.setPixmap(scaled)
+        self.image_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.image_label.customContextMenuRequested.connect(self.show_context_menu)
+
+    def show_context_menu(self, pos):
+        if not self.current_image:
+            return
+        from PySide6.QtWidgets import QMenu
+        menu = QMenu(self)
+        open_action = menu.addAction("Open in Folder")
+        action = menu.exec(self.image_label.mapToGlobal(pos))
+        if action == open_action:
+            _open_in_explorer_selected(self.current_image)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -127,23 +177,29 @@ class GalleryView(QWidget):
     def display_images(self, images: list[ImageData]):
         # Store current visible images
         self.current_thumbnails = images
-        
+
         # Clear current grid
         while self.grid.count():
             item = self.grid.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
 
-        # Calculate columns based on width
+        # Calculate columns: min 1, max 5, based on viewport width
         width = self.scroll.viewport().width()
-        thumb_width = 155  # 150 + spacing
-        columns = max(1, width // thumb_width)
+        thumb_width = 155  # 150px thumb + 5px spacing
+        columns = max(1, min(5, width // thumb_width))
 
         # Add thumbnails to grid
         for idx, image_data in enumerate(images):
             thumb = ThumbnailWidget(image_data)
             thumb.clicked.connect(self.show_full_image)
             self.grid.addWidget(thumb, idx // columns, idx % columns)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Re-tile whenever the gallery panel is resized by the splitter
+        if self.current_thumbnails:
+            self.display_images(self.current_thumbnails)
 
     def get_visible_images(self) -> list:
         """Return currently visible images"""

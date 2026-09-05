@@ -1,7 +1,7 @@
 import sys
 from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QDragMoveEvent
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QSettings
 from modules.duplicate_detector import DuplicateDetectorTab
 from modules.image_resizer import ImageResizerTab
 from modules.upscaler import UpscalerTab
@@ -20,8 +20,12 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1000, 600)
         self.setAcceptDrops(True)  # Enable drop for main window
 
+        # Used to remember the user's preferred tab order between sessions
+        self.settings = QSettings("DatasetManager", "ImageProcessingTool")
+
         # Create tab widget
         self.tabs = QTabWidget()
+        self.tabs.setMovable(True)  # Allow click-and-drag tab reordering
         self.setCentralWidget(self.tabs)
 
         # Create tabs
@@ -32,14 +36,44 @@ class MainWindow(QMainWindow):
         self.tag_editor_tab = TagEditorTab()
         self.conversion_tab = ConversionTab()
 
-        # Add tabs
-        self.tabs.addTab(self.duplicate_tab, "Duplicate Detection")
-        self.tabs.addTab(self.resizer_tab, "Image Resizer")
-        self.tabs.addTab(self.upscaler_tab, "Upscaler")
-        self.tabs.addTab(self.caption_tab, "Caption Generator")
-        self.tabs.addTab(self.tag_editor_tab, "Tags Editor")
-        self.tabs.addTab(self.conversion_tab, "Conversion Tools")
-        
+        # (stable key, display label, widget) in the default order
+        self.tab_definitions = [
+            ("duplicate", "Duplicate Detection", self.duplicate_tab),
+            ("resizer", "Image Resizer", self.resizer_tab),
+            ("upscaler", "Upscaler", self.upscaler_tab),
+            ("caption", "Caption Generator", self.caption_tab),
+            ("tag_editor", "Tags Editor", self.tag_editor_tab),
+            ("conversion", "Conversion Tools", self.conversion_tab),
+        ]
+
+        self._add_tabs_in_saved_order()
+
+        # Persist the new order whenever the user drags a tab into place
+        self.tabs.tabBar().tabMoved.connect(self._save_tab_order)
+
+    def _add_tabs_in_saved_order(self):
+        """Add tabs using the order saved from a previous session, if any."""
+        tab_map = {key: (label, widget) for key, label, widget in self.tab_definitions}
+        saved_order = self.settings.value("tab_order", [])
+        if isinstance(saved_order, str):  # QSettings may return a single str for a 1-item list
+            saved_order = [saved_order]
+
+        # Keep saved keys that still exist, then append any tabs missing from the saved order
+        ordered_keys = [key for key in saved_order if key in tab_map]
+        ordered_keys += [key for key, _, _ in self.tab_definitions if key not in ordered_keys]
+
+        self.tab_keys = []  # index -> key, kept in sync with the actual visual tab order
+        for key in ordered_keys:
+            label, widget = tab_map[key]
+            self.tabs.addTab(widget, label)
+            self.tab_keys.append(key)
+
+    def _save_tab_order(self, *_args):
+        """Recompute tab order from current widget positions and persist it."""
+        key_by_widget = {widget: key for key, _, widget in self.tab_definitions}
+        self.tab_keys = [key_by_widget[self.tabs.widget(i)] for i in range(self.tabs.count())]
+        self.settings.setValue("tab_order", self.tab_keys)
+
     def dragEnterEvent(self, event: QDragEnterEvent):
         if event.mimeData().hasUrls():
             event.accept()

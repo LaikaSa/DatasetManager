@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel, QSpinB
 from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent
 import requests
+from modules import settings
 from modules.logger import setup_logger
 
 logger = setup_logger()
@@ -83,13 +84,16 @@ class UpscaleWorker(QThread):
     status = Signal(str)
     finished = Signal()
 
-    def __init__(self, input_paths, model_path, scale_factor):
+    def __init__(self, input_paths, model_path, scale_factor, device=None):
         super().__init__()
         self.input_paths = input_paths if isinstance(input_paths, list) else [input_paths]
         self.model_path = model_path
         self.scale_factor = scale_factor
         self.is_running = True
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        if device:
+            self.device = device
+        else:
+            self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.model = None
         self.tile_size = 512
         self.tile_pad = 32
@@ -219,7 +223,8 @@ class UpscaleWorker(QThread):
 
     def run(self):
         try:
-            logger.info("Loading model...")
+            self.status.emit(f"Using device: {self.device}")
+            logger.info(f"Loading model on {self.device}...")
             self.load_model()
             
             total_files = len(self.input_paths)
@@ -640,7 +645,9 @@ class UpscalerTab(QWidget):
             self.update_status("No input files selected")
             return
 
-        self.worker = UpscaleWorker(input_paths, self.model_path, self.scale_spin.value())
+        device = settings.to_torch_device(settings.get_selected_device_id())
+        self.worker = UpscaleWorker(input_paths, self.model_path, self.scale_spin.value(),
+                                    device=device)
         self.worker.status.connect(self.update_status)
         self.worker.finished.connect(self.upscale_finished)
 

@@ -6,6 +6,12 @@ import pandas as pd
 import numpy as np
 import onnxruntime
 from PIL import Image
+from huggingface_hub import hf_hub_download
+try:
+    from huggingface_hub import hf_hub_try_to_load_from_cache as hf_try_to_load_from_cache
+except ImportError:  # huggingface_hub 1.x renamed it (drops the hf_ prefix)
+    from huggingface_hub import try_to_load_from_cache as hf_try_to_load_from_cache
+from modules import settings
 from modules.logger import setup_logger
 import sys
 import multiprocessing
@@ -25,30 +31,24 @@ def resource_path(relative_path):
 class ImageCaptioner:
     MODELS = {
         'wd-eva02-large-tagger-v3': {
-            'path': 'models/wd-eva02-large-tagger-v3',
             'type': 'eva02-v3',
             'repo_id': 'SmilingWolf/wd-eva02-large-tagger-v3',
             'opset': 17
         },
         'wd-swinv2-tagger-v3': {
-            'path': 'models/wd-swinv2-tagger-v3',
             'type': 'swinv2-v3',
             'repo_id': 'SmilingWolf/wd-swinv2-tagger-v3',
             'opset': 17
         },
         'wd-convnext-tagger-v3': {
-            'path': 'models/wd-convnext-tagger-v3',
             'type': 'convnext-v3',
             'repo_id': 'SmilingWolf/wd-convnext-tagger-v3',
             'opset': 17
         }
     }
 
-    def __init__(self, model_name='wd-eva02-large-tagger-v3'):
+    def __init__(self, model_name='wd-eva02-large-tagger-v3', device_id=None):
         print(f"Initializing ImageCaptioner with model: {model_name}")
-        
-        # Get root directory
-        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         
         if model_name not in self.MODELS:
             raise ValueError(f"Unknown model: {model_name}. Available models: {list(self.MODELS.keys())}")
@@ -56,11 +56,14 @@ class ImageCaptioner:
         # Get model info
         model_info = self.MODELS[model_name]
         self.model_type = model_info['type']
-        
-        # Construct full paths
-        model_dir = os.path.join(root_dir, model_info['path'])
-        model_path = os.path.join(model_dir, "model.onnx")
-        tags_path = os.path.join(model_dir, "selected_tags.csv")
+        repo_id = model_info['repo_id']
+
+        # Resolve model files from the shared HuggingFace cache
+        # (~/.cache/huggingface/hub). hf_hub_download returns the path to the
+        # cached file, downloading it first if it isn't already present, so
+        # models are never copied into the project's root folder.
+        model_path = hf_hub_download(repo_id, "model.onnx")
+        tags_path = hf_hub_download(repo_id, "selected_tags.csv")
 
         # Verify paths
         if not os.path.exists(model_path):
@@ -68,8 +71,14 @@ class ImageCaptioner:
         if not os.path.exists(tags_path):
             raise FileNotFoundError(f"Tags file not found at: {tags_path}")
 
+        # Resolve the compute device (global settings) and load model
+        if device_id is None:
+            device_id = settings.get_selected_device_id()
+        self.device_id = device_id
+        print(f"Using device: {settings.device_label(device_id)}")
+
         # Load model
-        self.session = self.create_session(model_path)
+        self.session = self.create_session(model_path, device_id)
         if self.session is None:
             raise Exception("Failed to create ONNX session")
 
@@ -237,7 +246,7 @@ class ImageCaptioner:
             print(f"Error converting model: {e}")
             return model_path
 
-    def create_session(self, model_path):
+    def create_session(self, model_path, device_id=None):
         try:
             import onnx
             import onnxruntime as ort
@@ -257,14 +266,18 @@ class ImageCaptioner:
             providers = []
             provider_options = []
             
-            if "CUDAExecutionProvider" in ort.get_available_providers():
+            use_cuda = device_id is not None and device_id >= 0
+            if use_cuda and "CUDAExecutionProvider" in ort.get_available_providers():
                 providers.append("CUDAExecutionProvider")
                 provider_options.append({
-                    'device_id': 0,
+                    'device_id': device_id,
                     'arena_extend_strategy': 'kNextPowerOfTwo',
                     'gpu_mem_limit': 4 * 1024 * 1024 * 1024,
                     'cudnn_conv_algo_search': 'EXHAUSTIVE',
                 })
+            elif use_cuda:
+                print(f"CUDA requested (GPU {device_id}) but CUDAExecutionProvider is "
+                      "unavailable in this onnxruntime build; falling back to CPU")
             
             # Always add CPU provider
             providers.append("CPUExecutionProvider")
@@ -630,14 +643,20 @@ class CaptionGeneratorTab(QWidget):
         self.initialize_captioner()
 
     def check_model_exists(self, model_name):
-        """Check if model files exist"""
-        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        model_info = ImageCaptioner.MODELS[model_name]
-        model_dir = os.path.join(root_dir, model_info['path'])
-        model_path = os.path.join(model_dir, "model.onnx")
-        tags_path = os.path.join(model_dir, "selected_tags.csv")
-        
-        return os.path.exists(model_path) and os.path.exists(tags_path)
+        """Check if model files exist in the HuggingFace cache
+        (~/.cache/huggingface/hub) without triggering any downloads."""
+        try:
+            model_info = ImageCaptioner.MODELS[model_name]
+            repo_id = model_info['repo_id']
+
+            # hf_hub_try_to_load_from_cache returns the local path when the
+            # file is already cached, or None otherwise (no network request).
+            model_path = hf_try_to_load_from_cache(repo_id, "model.onnx")
+            tags_path = hf_try_to_load_from_cache(repo_id, "selected_tags.csv")
+
+            return model_path is not None and tags_path is not None
+        except Exception:
+            return False
 
     def on_model_changed(self):
         """Handle model change event"""
@@ -659,14 +678,12 @@ class CaptionGeneratorTab(QWidget):
             self.status_text.append(f"Error changing model: {str(e)}")
 
     def download_model(self):
-        """Download the selected model"""
+        """Download the selected model into the shared HuggingFace cache
+        (~/.cache/huggingface/hub) instead of the project's root folder."""
         try:
-            from huggingface_hub import hf_hub_download
-            import os
-            
             model_name = self.model_dropdown.currentText()
             model_info = ImageCaptioner.MODELS[model_name]
-            repo_id = model_info['repo_id']  # This should work now
+            repo_id = model_info['repo_id']
             
             # Disable UI elements during download
             self.download_btn.setEnabled(False)
@@ -674,27 +691,17 @@ class CaptionGeneratorTab(QWidget):
             self.download_btn.setText("Downloading...")
             self.status_text.append(f"Downloading {model_name} from {repo_id}...")
             
-            # Create model directory
-            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            model_dir = os.path.join(root_dir, model_info['path'])
-            os.makedirs(model_dir, exist_ok=True)
-            
-            # Download files
+            # Download files. Omitting local_dir makes hf_hub_download store
+            # the files in the default HuggingFace cache directory
+            # (~/.cache/huggingface/hub) and return each cached file path.
             files = ["model.onnx", "selected_tags.csv"]
             for file in files:
                 self.status_text.append(f"Downloading {file}...")
                 try:
                     downloaded_path = hf_hub_download(
                         repo_id=repo_id,
-                        filename=file,
-                        local_dir=model_dir,  # Changed from cache_dir to local_dir
-                        force_download=True
+                        filename=file
                     )
-                    # Move file to correct location if needed
-                    target_path = os.path.join(model_dir, file)
-                    if downloaded_path != target_path:
-                        import shutil
-                        shutil.move(downloaded_path, target_path)
                     self.status_text.append(f"Downloaded {file}")
                 except Exception as e:
                     self.status_text.append(f"Error downloading {file}: {str(e)}")
@@ -739,8 +746,8 @@ class CaptionGeneratorTab(QWidget):
                 self.process_btn.setEnabled(False)
                 return
             
-            # Create new captioner instance
-            self.captioner = ImageCaptioner(model_name)
+            # Create new captioner instance on the globally selected device
+            self.captioner = ImageCaptioner(model_name, device_id=settings.get_selected_device_id())
             
             if self.captioner is None or self.captioner.session is None:
                 raise Exception("Failed to initialize captioner or session")
@@ -882,21 +889,18 @@ class CaptionGeneratorTab(QWidget):
         logger.error(error_message)
 
     def check_model_exists(self, model_name):
-        """Check if model files exist"""
+        """Check if model files exist in the HuggingFace cache
+        (~/.cache/huggingface/hub) without triggering any downloads."""
         try:
-            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             model_info = ImageCaptioner.MODELS[model_name]
-            model_dir = os.path.join(root_dir, model_info['path'])
-            model_path = os.path.join(model_dir, "model.onnx")
-            tags_path = os.path.join(model_dir, "selected_tags.csv")
-            
-            print(f"Checking model files:")  # Debug prints
-            print(f"Model path: {model_path}")
-            print(f"Tags path: {tags_path}")
-            print(f"Model exists: {os.path.exists(model_path)}")
-            print(f"Tags exist: {os.path.exists(tags_path)}")
-            
-            return os.path.exists(model_path) and os.path.exists(tags_path)
+            repo_id = model_info['repo_id']
+
+            # hf_hub_try_to_load_from_cache returns the local path when the
+            # file is already cached, or None otherwise (no network request).
+            model_path = hf_try_to_load_from_cache(repo_id, "model.onnx")
+            tags_path = hf_try_to_load_from_cache(repo_id, "selected_tags.csv")
+
+            return model_path is not None and tags_path is not None
         except Exception as e:
             print(f"Error checking model existence: {str(e)}")  # Debug print
             return False

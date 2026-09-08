@@ -8,6 +8,12 @@ from .processing import CaptionGeneratorThread
 from .local_llm_captioner import LocalLLMCaptioner, NaturalLanguageCaptionThread
 import os
 import multiprocessing
+from huggingface_hub import hf_hub_download
+try:
+    from huggingface_hub import hf_hub_try_to_load_from_cache as hf_try_to_load_from_cache
+except ImportError:  # huggingface_hub 1.x renamed it (drops the hf_ prefix)
+    from huggingface_hub import try_to_load_from_cache as hf_try_to_load_from_cache
+from modules import settings
 from modules.logger import setup_logger
 logger = setup_logger()
 
@@ -234,28 +240,19 @@ class CaptionGeneratorTab(QWidget):
         return self.model_dropdown.currentText() == NATURAL_LANGUAGE_OPTION
 
     def check_model_exists(self, model_name):
-        """Check if model files exist"""
+        """Check if model files exist in the HuggingFace cache
+        (~/.cache/huggingface/hub) without triggering any downloads."""
         try:
-            # Get root directory (two levels up from ui.py)
-            root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             model_info = ImageCaptioner.MODELS[model_name]
-            
-            # Construct paths using os.path.join
-            model_dir = os.path.join(root_dir, model_info['path'])
-            model_path = os.path.normpath(os.path.join(model_dir, "model.onnx"))
-            tags_path = os.path.normpath(os.path.join(model_dir, "selected_tags.csv"))
-            
-            print(f"Checking model files:")
-            print(f"Root directory: {root_dir}")
-            print(f"Model directory: {model_dir}")
-            print(f"Model path: {model_path}")
-            print(f"Tags path: {tags_path}")
-            print(f"Model exists: {os.path.exists(model_path)}")
-            print(f"Tags exist: {os.path.exists(tags_path)}")
-            
-            exists = os.path.exists(model_path) and os.path.exists(tags_path)
-            print(f"Final check result: {exists}")
-            
+            repo_id = model_info['repo_id']
+
+            # Resolve from the shared HuggingFace cache. hf_hub_try_to_load_
+            # from_cache returns the local path when the file is already
+            # cached, or None otherwise (no network request is made).
+            model_path = hf_try_to_load_from_cache(repo_id, "model.onnx")
+            tags_path = hf_try_to_load_from_cache(repo_id, "selected_tags.csv")
+
+            exists = model_path is not None and tags_path is not None
             return exists
         except Exception as e:
             print(f"Error checking model existence: {str(e)}")
@@ -296,17 +293,12 @@ class CaptionGeneratorTab(QWidget):
             self.initialize_captioner()
 
     def download_model(self):
-        """Download the selected model"""
+        """Download the selected model into the shared HuggingFace cache
+        (~/.cache/huggingface/hub) instead of the project's root folder."""
         try:
-            from huggingface_hub import hf_hub_download
-            import os
-            
             model_name = self.model_dropdown.currentText()
             model_info = ImageCaptioner.MODELS[model_name]
             repo_id = model_info['repo_id']
-            
-            # Get root directory
-            root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
             
             # Disable UI elements during download
             self.download_btn.setEnabled(False)
@@ -314,38 +306,26 @@ class CaptionGeneratorTab(QWidget):
             self.download_btn.setText("Downloading...")
             self.status_text.append(f"Downloading {model_name} from {repo_id}...")
             
-            # Create model directory in root/models
-            model_dir = os.path.normpath(os.path.join(root_dir, model_info['path']))
-            os.makedirs(model_dir, exist_ok=True)
-            
-            print(f"Downloading to directory: {model_dir}")  # Debug print
-            
-            # Download files
+            # Download files. Omitting local_dir makes hf_hub_download store
+            # the files in the default HuggingFace cache directory
+            # (~/.cache/huggingface/hub) and return each cached file path.
             files = ["model.onnx", "selected_tags.csv"]
             for file in files:
                 self.status_text.append(f"Downloading {file}...")
                 try:
                     downloaded_path = hf_hub_download(
                         repo_id=repo_id,
-                        filename=file,
-                        local_dir=model_dir,
-                        force_download=True
+                        filename=file
                     )
-                    target_path = os.path.normpath(os.path.join(model_dir, file))
                     print(f"Downloaded to: {downloaded_path}")  # Debug print
-                    print(f"Target path: {target_path}")  # Debug print
-                    
-                    if downloaded_path != target_path:
-                        import shutil
-                        shutil.move(downloaded_path, target_path)
                     self.status_text.append(f"Downloaded {file}")
                 except Exception as e:
                     self.status_text.append(f"Error downloading {file}: {str(e)}")
                     raise
             
-            # Verify files exist after download
+            # Verify files exist in the cache after download
             if not self.check_model_exists(model_name):
-                raise Exception(f"Files not found after download in {model_dir}")
+                raise Exception(f"Files not found in the HuggingFace cache after download")
             
             # Re-enable UI elements
             self.download_btn.setEnabled(True)
@@ -399,10 +379,11 @@ class CaptionGeneratorTab(QWidget):
                 self.process_btn.setEnabled(False)
                 return
             
-            # Pass debug state when creating captioner
+            # Pass debug state and the globally selected device when creating captioner
             self.captioner = ImageCaptioner(
                 model_name,
-                debug_mode=self.debug_checkbox.isChecked()
+                debug_mode=self.debug_checkbox.isChecked(),
+                device_id=settings.get_selected_device_id()
             )
             
             if self.captioner is None or self.captioner.session is None:

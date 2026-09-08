@@ -5,6 +5,8 @@ import os
 import multiprocessing
 import pandas as pd
 from PIL import Image
+from huggingface_hub import hf_hub_download
+from modules import settings
 from modules.logger import setup_logger
 
 logger = setup_logger()
@@ -12,28 +14,22 @@ logger = setup_logger()
 class ImageCaptioner:
     MODELS = {
         'wd-eva02-large-tagger-v3': {
-            'path': os.path.join('models', 'wd-eva02-large-tagger-v3'),  # Use os.path.join
             'type': 'eva02-v3',
             'repo_id': 'SmilingWolf/wd-eva02-large-tagger-v3'
         },
         'wd-swinv2-tagger-v3': {
-            'path': os.path.join('models', 'wd-swinv2-tagger-v3'),
             'type': 'swinv2-v3',
             'repo_id': 'SmilingWolf/wd-swinv2-tagger-v3'
         },
         'wd-convnext-tagger-v3': {
-            'path': os.path.join('models', 'wd-convnext-tagger-v3'),
             'type': 'convnext-v3',
             'repo_id': 'SmilingWolf/wd-convnext-tagger-v3'
         }
     }
 
-    def __init__(self, model_name='wd-eva02-large-tagger-v3', debug_mode=False):
+    def __init__(self, model_name='wd-eva02-large-tagger-v3', debug_mode=False, device_id=None):
         self.debug_mode = debug_mode  # Store debug mode as instance variable
         print(f"Initializing ImageCaptioner with model: {model_name}")
-        
-        # Get root directory (two levels up from models.py)
-        root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         
         if model_name not in self.MODELS:
             raise ValueError(f"Unknown model: {model_name}. Available models: {list(self.MODELS.keys())}")
@@ -41,11 +37,14 @@ class ImageCaptioner:
         # Get model info
         model_info = self.MODELS[model_name]
         self.model_type = model_info['type']
-        
-        # Construct full paths using root directory
-        model_dir = os.path.join(root_dir, model_info['path'])
-        model_path = os.path.join(model_dir, "model.onnx")
-        tags_path = os.path.join(model_dir, "selected_tags.csv")
+        repo_id = model_info['repo_id']
+
+        # Resolve model files from the shared HuggingFace cache
+        # (~/.cache/huggingface/hub). hf_hub_download returns the path to the
+        # cached file, downloading it first if it isn't already present, so
+        # models are never copied into the project's root folder.
+        model_path = hf_hub_download(repo_id, "model.onnx")
+        tags_path = hf_hub_download(repo_id, "selected_tags.csv")
         
         print(f"Looking for model at: {model_path}")
         print(f"Looking for tags at: {tags_path}")
@@ -56,8 +55,14 @@ class ImageCaptioner:
         if not os.path.exists(tags_path):
             raise FileNotFoundError(f"Tags file not found at: {tags_path}")
 
+        # Resolve the compute device (global settings) and load model
+        if device_id is None:
+            device_id = settings.get_selected_device_id()
+        self.device_id = device_id
+        print(f"Using device: {settings.device_label(device_id)}")
+
         # Load model
-        self.session = self.create_session(model_path)
+        self.session = self.create_session(model_path, device_id)
         if self.session is None:
             raise Exception("Failed to create ONNX session")
 
@@ -70,7 +75,7 @@ class ImageCaptioner:
         self.target_size = height
         print(f"Model input shape: {height}x{width}")
 
-    def create_session(self, model_path):
+    def create_session(self, model_path, device_id=None):
         try:
             import onnx
             import onnxruntime as ort
@@ -90,14 +95,18 @@ class ImageCaptioner:
             providers = []
             provider_options = []
             
-            if "CUDAExecutionProvider" in ort.get_available_providers():
+            use_cuda = device_id is not None and device_id >= 0
+            if use_cuda and "CUDAExecutionProvider" in ort.get_available_providers():
                 providers.append("CUDAExecutionProvider")
                 provider_options.append({
-                    'device_id': 0,
+                    'device_id': device_id,
                     'arena_extend_strategy': 'kNextPowerOfTwo',
                     'gpu_mem_limit': 4 * 1024 * 1024 * 1024,
                     'cudnn_conv_algo_search': 'EXHAUSTIVE',
                 })
+            elif use_cuda:
+                print(f"CUDA requested (GPU {device_id}) but CUDAExecutionProvider is "
+                      "unavailable in this onnxruntime build; falling back to CPU")
             
             # Always add CPU provider
             providers.append("CPUExecutionProvider")

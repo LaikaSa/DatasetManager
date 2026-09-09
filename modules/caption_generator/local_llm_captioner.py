@@ -5,11 +5,13 @@ same /v1/chat/completions endpoint will work - text-generation-webui,
 koboldcpp, Ollama's OpenAI-compat endpoint, etc.).
 
 Design notes (see the conversation this was built from for the full spec):
-- No system prompt is ever sent from here. The instructions for how to turn
-  tags into a caption (and what to do when there are no tags at all) are
-  expected to already be configured as the model's system prompt on the
-  server itself (e.g. in LM Studio's per-model settings). We only send the
-  image, plus the existing Danbooru tags as plain text if there are any.
+- A system prompt IS sent with every request, overriding any system prompt
+  configured on the server. It is read from 'systemprompt.json' in this
+  module's directory (created and edited by the user themselves). If that
+  file is missing or unreadable, a built-in default captioning prompt is
+  used instead so captioning never breaks.
+- We send the image, plus the existing Danbooru tags as plain text if there
+  are any, in the user turn.
 - Every image is sent as a brand new request (no chat history is kept
   between images) to avoid burning context on unrelated prior turns.
 - Sampling settings (temperature, top_p, etc.) are intentionally NOT sent -
@@ -40,6 +42,25 @@ logger = setup_logger()
 
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp')
 
+# User-editable system prompt file, living next to this module.
+DEFAULT_SYSTEM_PROMPT_FILE = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "systemprompt.json"
+)
+
+# Fallback system prompt, used only when systemprompt.json is missing or
+# cannot be parsed. It tells the model to write a plain caption and to avoid
+# grounding/detection output (box_2d / bbox_2d / JSON / tag lists), which is
+# the failure mode this whole feature was added to prevent.
+DEFAULT_SYSTEM_PROMPT = (
+    "You write natural-language captions for a Stable Diffusion anime "
+    "training set. You are given an image, and sometimes a list of existing "
+    "tags for reference. Describe the image in one or two clear, natural "
+    "English sentences. If tags are provided, let them inform your "
+    "description but write it as flowing prose. Output ONLY the caption "
+    "text. Do NOT output JSON, bounding boxes, 'box_2d', 'bbox_2d', "
+    "coordinates, markdown, or a list of tags."
+)
+
 # Strips <think>...</think>, <thinking>...</thinking>, <reasoning>...</reasoning>,
 # and <reflection>...</reflection> blocks some local reasoning models emit
 # inline before their final answer.
@@ -47,6 +68,23 @@ _REASONING_TAG_PATTERN = re.compile(
     r"<\s*(think|thinking|reasoning|reflection)\s*>.*?<\s*/\s*\1\s*>",
     re.IGNORECASE | re.DOTALL,
 )
+
+
+def _extract_system_prompt(data):
+    """Pull the system-prompt string out of parsed JSON.
+
+    Accepts a bare JSON string ("..."), or an object with the text under one
+    of the common keys. Returns None when nothing usable is found so the
+    caller can fall back to DEFAULT_SYSTEM_PROMPT.
+    """
+    if isinstance(data, str):
+        return data.strip() or None
+    if isinstance(data, dict):
+        for key in ("system_prompt", "system", "prompt", "content"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
 
 
 class LocalLLMCancelled(Exception):
@@ -58,12 +96,17 @@ class LocalLLMCaptioner:
     """Talks to an OpenAI-compatible /v1/chat/completions endpoint to turn
     an image (plus optional existing tags) into a natural-language caption."""
 
-    def __init__(self, base_url, debug_mode=False, request_timeout=300):
+    def __init__(self, base_url, debug_mode=False, request_timeout=300,
+                 system_prompt_file=None):
         self.base_url = (base_url or "").rstrip('/')
         self.debug_mode = debug_mode
         self.request_timeout = request_timeout
+        self.system_prompt_file = system_prompt_file or DEFAULT_SYSTEM_PROMPT_FILE
         self._active_response = None
         self._lock = threading.Lock()
+        # (file-signature, prompt) so we re-read systemprompt.json only when
+        # it changes, and re-emit the "falling back" warning only once.
+        self._system_prompt_cache = None
         # Kept only so UI code that checks `captioner.session` (a WD-tagger
         # concept) doesn't need special-casing everywhere it's read.
         self.session = True
@@ -83,16 +126,82 @@ class LocalLLMCaptioner:
             encoded = base64.b64encode(buffer.getvalue()).decode('utf-8')
         return f"data:image/jpeg;base64,{encoded}"
 
+    def _load_system_prompt(self):
+        """Read the user's system prompt from systemprompt.json (next to this
+        module). It is sent with every request and overrides any system
+        prompt set on the server. Falls back to DEFAULT_SYSTEM_PROMPT when
+        the file is missing or unreadable, and re-reads automatically when
+        the file changes, so edits take effect without a restart. The file may
+        be valid JSON or plain text (e.g. a Markdown prompt) - both are
+        accepted, since the user edits it themselves."""
+        try:
+            signature = ("mtime", os.path.getmtime(self.system_prompt_file))
+        except OSError:
+            signature = ("missing", None)
+
+        cached = self._system_prompt_cache
+        if cached is not None and cached[0] == signature:
+            return cached[1]
+
+        if signature[0] == "missing":
+            logger.warning(
+                "System prompt file not found: %s - using the built-in default.",
+                self.system_prompt_file,
+            )
+            prompt = DEFAULT_SYSTEM_PROMPT
+        else:
+            try:
+                with open(self.system_prompt_file, "r", encoding="utf-8") as f:
+                    raw = f.read()
+            except OSError as e:
+                logger.warning(
+                    "Could not read system prompt from %s (%s) - using the built-in default.",
+                    self.system_prompt_file, e,
+                )
+                raw = None
+
+            prompt = None
+            if raw:
+                text = raw.strip()
+                if text:
+                    # Accept either valid JSON (an object with a 'system_prompt'
+                    # key, or a bare JSON string) or plain text (e.g. a Markdown
+                    # prompt). If it isn't valid JSON, use the whole file as the
+                    # prompt so the user's existing file works as-is.
+                    try:
+                        prompt = _extract_system_prompt(json.loads(text))
+                    except json.JSONDecodeError:
+                        prompt = text
+
+            if not prompt:
+                logger.warning(
+                    "No usable system prompt in %s - using the built-in default.",
+                    self.system_prompt_file,
+                )
+                prompt = DEFAULT_SYSTEM_PROMPT
+
+        self._system_prompt_cache = (signature, prompt)
+        if self.debug_mode:
+            logger.debug("Using system prompt from %s", self.system_prompt_file)
+        return prompt
+
     def _build_messages(self, image_path, tags_text):
+        messages = []
+        # The user-editable system prompt overrides whatever is configured
+        # on the server.
+        system_prompt = self._load_system_prompt()
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+
         content = [
             {"type": "image_url", "image_url": {"url": self._encode_image(image_path)}}
         ]
-        # Only ever add the tags as plain text. Nothing else goes in the
-        # user turn - the system prompt already configured on the server
-        # is what tells the model what to do with (or without) them.
+        # Only ever add the tags as plain text in the user turn; the system
+        # prompt is what tells the model what to do with (or without) them.
         if tags_text:
             content.append({"type": "text", "text": tags_text})
-        return [{"role": "user", "content": content}]
+        messages.append({"role": "user", "content": content})
+        return messages
 
     def stop_current_request(self):
         """Abort the in-flight HTTP request, if any. Closing the connection

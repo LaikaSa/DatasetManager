@@ -24,18 +24,21 @@ DEFAULT_LOCAL_LLM_URL = "http://127.0.0.1:1234"
 class CaptionGeneratorTab(QWidget):
     def __init__(self):
         super().__init__()
-        self.captioner = None
+        self.captioner = None  # Built lazily on the first "Generate Captions" click
         self.worker = None
         self.init_ui()
         
-        # Initialize with default model after UI setup
+        # Set up the default model's UI state (e.g. whether the "Download
+        # Model" button shows) without actually loading the model: this is
+        # only a local HuggingFace cache check, so the GUI appears within
+        # seconds. The heavy ONNX model is loaded on first Process click.
         try:
             default_model = 'wd-eva02-large-tagger-v3'
             if self.check_model_exists(default_model):
                 self.model_dropdown.setCurrentText(default_model)
-                self.initialize_captioner()
+            self.on_model_changed()
         except Exception as e:
-            print(f"Error initializing default model: {str(e)}")
+            print(f"Error setting up default model: {str(e)}")
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -210,7 +213,8 @@ class CaptionGeneratorTab(QWidget):
         
         # Connect signals
         self.folder_input.textChanged.connect(self.validate_folder)
-        self.initialize_captioner()
+        # The captioner itself is built lazily on the first "Generate
+        # Captions" click (see start_processing) to keep startup fast.
 
     def _create_threshold_slider(self, label, default_value):
         """Helper method to create threshold slider layouts"""
@@ -268,7 +272,9 @@ class CaptionGeneratorTab(QWidget):
                 self.download_btn.hide()
                 self.llm_url_input.show()
                 self.wd_options_container.hide()
-                self.initialize_captioner()
+                # The (lightweight) LLM captioner is rebuilt with the current
+                # URL on the next "Generate Captions" click
+                self.captioner = None
                 return
 
             self.llm_url_input.hide()
@@ -277,20 +283,26 @@ class CaptionGeneratorTab(QWidget):
             if self.check_model_exists(model_name):
                 print(f"Model files found for {model_name}")  # Debug print
                 self.download_btn.hide()
-                self.initialize_captioner()
+                # Drop any cached captioner so the (heavy) ONNX model is
+                # only (re)built on the next "Generate Captions" click
+                self.captioner = None
+                self.validate_folder(self.folder_input.text())
             else:
                 print(f"Model files not found for {model_name}")  # Debug print
                 self.download_btn.show()
                 self.process_btn.setEnabled(False)
+                self.captioner = None
                 self.status_text.append(f"Model {model_name} not found. Click Download Model to download it.")
         except Exception as e:
             print(f"Error in on_model_changed: {str(e)}")  # Debug print
             self.status_text.append(f"Error changing model: {str(e)}")
 
     def on_llm_url_changed(self):
-        """Re-initialize the local LLM captioner when the URL field is edited"""
+        """Invalidate the cached captioner when the URL field is edited.
+        A fresh captioner with the new URL is built on the next
+        "Generate Captions" click."""
         if self.is_natural_language_mode():
-            self.initialize_captioner()
+            self.captioner = None
 
     def download_model(self):
         """Download the selected model into the shared HuggingFace cache
@@ -332,10 +344,12 @@ class CaptionGeneratorTab(QWidget):
             self.model_dropdown.setEnabled(True)
             self.download_btn.setText("Download Model")
             
-            # Hide download button and initialize captioner
+            # Hide download button. The captioner itself is built lazily
+            # on the first "Generate Captions" click
             self.download_btn.hide()
+            self.captioner = None
             self.status_text.append(f"Model {model_name} downloaded successfully!")
-            self.initialize_captioner()
+            self.validate_folder(self.folder_input.text())
             
         except Exception as e:
             error_msg = f"Error downloading model: {str(e)}"
@@ -457,7 +471,14 @@ class CaptionGeneratorTab(QWidget):
             QMessageBox.warning(self, "Error", "Please select a valid folder")
             return
 
-        # Verify captioner is initialized
+        # Build the captioner lazily on first run (mirroring the upscaler's
+        # lazy model loading) so the GUI appears quickly at startup.
+        # initialize_captioner() checks the local HuggingFace cache and
+        # shows the download button if the model is missing.
+        if self.captioner is None:
+            self.status_text.append("Loading caption model (first run)...")
+            self.initialize_captioner()
+
         if self.captioner is None:
             self.status_text.append("Error: Captioner not initialized. Please select a model first.")
             return

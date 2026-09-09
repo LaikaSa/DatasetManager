@@ -6,6 +6,10 @@ import multiprocessing
 import pandas as pd
 from PIL import Image
 from huggingface_hub import hf_hub_download
+try:
+    from huggingface_hub import hf_hub_try_to_load_from_cache as hf_try_to_load_from_cache
+except ImportError:  # huggingface_hub 1.x renamed it (drops the hf_ prefix)
+    from huggingface_hub import try_to_load_from_cache as hf_try_to_load_from_cache
 from modules import settings
 from modules.logger import setup_logger
 
@@ -40,11 +44,17 @@ class ImageCaptioner:
         repo_id = model_info['repo_id']
 
         # Resolve model files from the shared HuggingFace cache
-        # (~/.cache/huggingface/hub). hf_hub_download returns the path to the
-        # cached file, downloading it first if it isn't already present, so
-        # models are never copied into the project's root folder.
-        model_path = hf_hub_download(repo_id, "model.onnx")
-        tags_path = hf_hub_download(repo_id, "selected_tags.csv")
+        # (~/.cache/huggingface/hub). Try the local cache first: 
+        # hf_try_to_load_from_cache returns the path when the file is already
+        # cached and makes NO network request at all. Only fall back to
+        # hf_hub_download (which may hit the network) when a file is not
+        # cached, so models are never copied into the project's root folder.
+        model_path = hf_try_to_load_from_cache(repo_id, "model.onnx")
+        if model_path is None:
+            model_path = hf_hub_download(repo_id, "model.onnx")
+        tags_path = hf_try_to_load_from_cache(repo_id, "selected_tags.csv")
+        if tags_path is None:
+            tags_path = hf_hub_download(repo_id, "selected_tags.csv")
         
         print(f"Looking for model at: {model_path}")
         print(f"Looking for tags at: {tags_path}")

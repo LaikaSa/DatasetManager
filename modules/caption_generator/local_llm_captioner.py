@@ -20,6 +20,9 @@ Design notes (see the conversation this was built from for the full spec):
   HTTP connection while it is still streaming causes LM Studio (and most
   other llama.cpp-based OpenAI-compatible servers) to stop generating on
   their end too, rather than just abandoning the response on our side.
+- An optional prefix entered in the UI is prepended to each caption before
+  it is saved, mirroring the "Prefix tags" behavior of the tag captioner
+  (a comma is used as separator unless the prefix already ends with one).
 - Any inline "thinking" the model emits (<think>...</think> and similar
   wrapper tags some reasoning models use) is stripped before saving - only
   the final answer is written to the .txt file.
@@ -299,11 +302,13 @@ class NaturalLanguageCaptionThread(QThread):
 
     TAG_CAPTIONS_DIRNAME = "Tag Captions"
 
-    def __init__(self, captioner, folder_path, recursive=False):
+    def __init__(self, captioner, folder_path, recursive=False,
+                 caption_prefix=""):
         super().__init__()
         self.captioner = captioner
         self.folder_path = folder_path
         self.recursive = recursive
+        self.caption_prefix = (caption_prefix or "").strip()
         self._stop_event = threading.Event()
 
     def request_stop(self):
@@ -314,6 +319,22 @@ class NaturalLanguageCaptionThread(QThread):
 
     def _should_stop(self):
         return self._stop_event.is_set()
+
+    def _apply_prefix(self, caption):
+        """Prepend the user's prefix text to the generated caption.
+
+        Mirrors the tag-mode "Prefix tags" behavior: the prefix is put at
+        the very beginning, and ", " is inserted between it and the caption
+        unless the prefix already ends with a comma (so users can control
+        the exact separator themselves)."""
+        prefix = self.caption_prefix
+        if not prefix:
+            return caption
+        if not caption:
+            return prefix
+        if prefix.endswith(","):
+            return prefix + " " + caption
+        return prefix + ", " + caption
 
     def run(self):
         try:
@@ -337,6 +358,7 @@ class NaturalLanguageCaptionThread(QThread):
                         tags_text=tags_text,
                         should_stop=self._should_stop,
                     )
+                    caption = self._apply_prefix(caption)
 
                     txt_path = os.path.splitext(image_path)[0] + '.txt'
                     with open(txt_path, 'w', encoding='utf-8') as f:

@@ -87,6 +87,24 @@ class CaptionGeneratorTab(QWidget):
         model_layout.addStretch()
         self.model_dropdown.currentIndexChanged.connect(self.on_model_changed)
         
+        # Caption prefix for natural language mode - only shown when
+        # "Natural Language" is selected (mirrors the tag-mode "Prefix tags")
+        self.nl_prefix_container = QWidget()
+        nl_prefix_layout = QHBoxLayout(self.nl_prefix_container)
+        nl_prefix_layout.setContentsMargins(0, 0, 0, 0)
+        nl_prefix_label = QLabel("Caption prefix:")
+        self.caption_prefix_input = QLineEdit()
+        self.caption_prefix_input.setPlaceholderText("Text to prepend to each caption (e.g. 1girl, solo)")
+        self.caption_prefix_input.setToolTip(
+            "Text added to the beginning of every generated natural-language "
+            "caption, the same way \"Prefix tags\" works for tag captions.\n"
+            "If the text doesn't end with a comma, \", \" is inserted "
+            "between it and the caption."
+        )
+        nl_prefix_layout.addWidget(nl_prefix_label)
+        nl_prefix_layout.addWidget(self.caption_prefix_input)
+        self.nl_prefix_container.hide()
+        
         # 3. Options Checkboxes Section (WD-tagger only)
         checkbox_layout = QHBoxLayout()
         self.rating_checkbox = QCheckBox("Include rating tags")
@@ -204,6 +222,7 @@ class CaptionGeneratorTab(QWidget):
         # Add all sections to main layout
         layout.addLayout(folder_layout)
         layout.addLayout(model_layout)
+        layout.addWidget(self.nl_prefix_container)
         layout.addLayout(debug_layout)
         layout.addWidget(self.wd_options_container)
         layout.addWidget(self.status_text)
@@ -271,6 +290,7 @@ class CaptionGeneratorTab(QWidget):
             if model_name == NATURAL_LANGUAGE_OPTION:
                 self.download_btn.hide()
                 self.llm_url_input.show()
+                self.nl_prefix_container.show()
                 self.wd_options_container.hide()
                 # The (lightweight) LLM captioner is rebuilt with the current
                 # URL on the next "Generate Captions" click
@@ -278,6 +298,7 @@ class CaptionGeneratorTab(QWidget):
                 return
 
             self.llm_url_input.hide()
+            self.nl_prefix_container.hide()
             self.wd_options_container.show()
             
             if self.check_model_exists(model_name):
@@ -458,6 +479,7 @@ class CaptionGeneratorTab(QWidget):
         self.recursive_checkbox.setEnabled(enabled)
         self.model_dropdown.setEnabled(enabled)
         self.llm_url_input.setEnabled(enabled)
+        self.caption_prefix_input.setEnabled(enabled)
         self.undesired_input.setEnabled(enabled)
         self.prefix_input.setEnabled(enabled)
         self.append_checkbox.setEnabled(enabled)
@@ -498,10 +520,12 @@ class CaptionGeneratorTab(QWidget):
         self.set_controls_enabled(False)
 
         if natural_language_mode:
+            caption_prefix = self.caption_prefix_input.text().strip()
             self.worker = NaturalLanguageCaptionThread(
                 self.captioner,
                 folder_path,
                 recursive=self.recursive_checkbox.isChecked(),
+                caption_prefix=caption_prefix,
             )
             self.worker.caption_generated.connect(self.update_status)
             self.worker.process_completed.connect(self.process_completed)
@@ -512,6 +536,7 @@ class CaptionGeneratorTab(QWidget):
             logger.info(f"Folder: {folder_path}")
             logger.info(f"Local LLM URL: {self.captioner.base_url}")
             logger.info(f"Recursive: {self.recursive_checkbox.isChecked()}")
+            logger.info(f"Caption prefix: {caption_prefix}")
 
             self.worker.start()
             return

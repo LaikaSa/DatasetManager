@@ -1,16 +1,14 @@
 import sys
 from PySide6.QtWidgets import (QApplication, QMainWindow, QTabWidget, QMenu,
-                              QToolButton)
+                              QToolButton, QWidget)
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QDragMoveEvent, QAction
 from PySide6.QtCore import Qt, QSettings
-from modules.duplicate_detector import DuplicateDetectorTab
-from modules.image_resizer import ImageResizerTab
-from modules.Upscaler.upscaler import UpscalerTab
 from modules.logger import setup_logger
-from modules.caption_generator import CaptionGeneratorTab
-from modules.tag_editor import TagEditorTab
-from modules.Conversion_Tools import ConversionTab
 from modules import settings as app_settings
+# NOTE: the tab modules are intentionally NOT imported here. They pull in
+# heavy dependencies (torch ~2 s, pandas, onnxruntime, cv2, ...) which used to
+# delay the GUI appearing at startup. Each tab is built lazily on first visit
+# (see _build_tab / _ensure_tab_built).
 import os  # Add this for path operations
 logger = setup_logger()
 
@@ -30,24 +28,19 @@ class MainWindow(QMainWindow):
         self.tabs.setMovable(True)  # Allow click-and-drag tab reordering
         self.setCentralWidget(self.tabs)
 
-        # Create tabs
-        self.duplicate_tab = DuplicateDetectorTab()
-        self.resizer_tab = ImageResizerTab()
-        self.upscaler_tab = UpscalerTab()
-        self.caption_tab = CaptionGeneratorTab()
-        self.tag_editor_tab = TagEditorTab()
-        self.conversion_tab = ConversionTab()
-
-        # (stable key, display label, widget) in the default order
+        # (stable key, display label) in the default order. The widgets
+        # themselves are created lazily when the tab is first shown.
         self.tab_definitions = [
-            ("duplicate", "Duplicate Detection", self.duplicate_tab),
-            ("resizer", "Image Resizer", self.resizer_tab),
-            ("upscaler", "Upscaler", self.upscaler_tab),
-            ("caption", "Caption Generator", self.caption_tab),
-            ("tag_editor", "Tags Editor", self.tag_editor_tab),
-            ("conversion", "Conversion Tools", self.conversion_tab),
+            ("duplicate", "Duplicate Detection"),
+            ("resizer", "Image Resizer"),
+            ("upscaler", "Upscaler"),
+            ("caption", "Caption Generator"),
+            ("tag_editor", "Tags Editor"),
+            ("conversion", "Conversion Tools"),
         ]
 
+        self._building_tab = False  # re-entrancy guard for _ensure_tab_built
+        self._built_keys = set()    # tab keys whose real widget is already built
         self._add_tabs_in_saved_order()
 
         # Persist the new order whenever the user drags a tab into place
@@ -89,27 +82,87 @@ class MainWindow(QMainWindow):
         logger.info("Compute device set to: %s", app_settings.device_label(device_id))
         self._rebuild_device_menu()
 
+    def _build_tab(self, key):
+        """Import and construct the tab widget for a key (deferred imports)."""
+        if key == "duplicate":
+            from modules.duplicate_detector import DuplicateDetectorTab
+            return DuplicateDetectorTab()
+        if key == "resizer":
+            from modules.image_resizer import ImageResizerTab
+            return ImageResizerTab()
+        if key == "upscaler":
+            from modules.Upscaler.upscaler import UpscalerTab
+            return UpscalerTab()
+        if key == "caption":
+            from modules.caption_generator import CaptionGeneratorTab
+            return CaptionGeneratorTab()
+        if key == "tag_editor":
+            from modules.tag_editor import TagEditorTab
+            return TagEditorTab()
+        if key == "conversion":
+            from modules.Conversion_Tools import ConversionTab
+            return ConversionTab()
+        raise KeyError(f"Unknown tab key: {key}")
+
     def _add_tabs_in_saved_order(self):
-        """Add tabs using the order saved from a previous session, if any."""
-        tab_map = {key: (label, widget) for key, label, widget in self.tab_definitions}
+        """Add tabs using the order saved from a previous session, if any.
+
+        Light placeholder widgets are added first; the real tab (and its
+        module, which may take seconds to import) is only built when the
+        tab is first selected.
+        """
+        label_by_key = {key: label for key, label in self.tab_definitions}
         saved_order = self.settings.value("tab_order", [])
         if isinstance(saved_order, str):  # QSettings may return a single str for a 1-item list
             saved_order = [saved_order]
 
         # Keep saved keys that still exist, then append any tabs missing from the saved order
-        ordered_keys = [key for key in saved_order if key in tab_map]
-        ordered_keys += [key for key, _, _ in self.tab_definitions if key not in ordered_keys]
+        ordered_keys = [key for key in saved_order if key in label_by_key]
+        ordered_keys += [key for key, _ in self.tab_definitions if key not in ordered_keys]
 
         self.tab_keys = []  # index -> key, kept in sync with the actual visual tab order
+        self.tab_widgets = {}  # key -> current widget (placeholder until built)
         for key in ordered_keys:
-            label, widget = tab_map[key]
-            self.tabs.addTab(widget, label)
+            self.tabs.addTab(QWidget(), label_by_key[key])
+            self.tab_widgets[key] = self.tabs.currentWidget()
             self.tab_keys.append(key)
+
+        self.tabs.currentChanged.connect(self._ensure_tab_built)
+        self._ensure_tab_built(self.tabs.currentIndex())
+
+    def _ensure_tab_built(self, index):
+        """Replace the placeholder at `index` with the real tab, once."""
+        # insertTab() below emits currentChanged synchronously - the guard
+        # prevents that signal from re-entering this method before
+        # tab_widgets[key] points at the real widget (infinite recursion).
+        if self._building_tab or index < 0 or index >= self.tabs.count():
+            return
+        key = self.tab_keys[index]
+        if key in self._built_keys:
+            return
+
+        self._building_tab = True
+        try:
+            real = self._build_tab(key)
+            label = self.tabs.tabText(index)
+            self.tabs.insertTab(index, real, label)
+            self.tabs.removeTab(index + 1)  # drop the placeholder
+            self.tab_widgets[key] = real
+            self._built_keys.add(key)
+            self.tabs.setCurrentIndex(index)
+        finally:
+            self._building_tab = False
 
     def _save_tab_order(self, *_args):
         """Recompute tab order from current widget positions and persist it."""
-        key_by_widget = {widget: key for key, _, widget in self.tab_definitions}
-        self.tab_keys = [key_by_widget[self.tabs.widget(i)] for i in range(self.tabs.count())]
+        # Use indexOf() (resolves by C++ pointer) - Python wrapper identity
+        # is not stable for reparented widgets, so a dict keyed on wrappers
+        # would raise KeyError.
+        self.tab_keys = [None] * self.tabs.count()
+        for key, widget in self.tab_widgets.items():
+            i = self.tabs.indexOf(widget)
+            if i >= 0:
+                self.tab_keys[i] = key
         self.settings.setValue("tab_order", self.tab_keys)
 
     def dragEnterEvent(self, event: QDragEnterEvent):
@@ -129,6 +182,8 @@ class MainWindow(QMainWindow):
         current_tab = self.tabs.currentWidget()
         
         # Handle the drop based on the current tab
+        # (deferred import: only reached when a drop actually happens)
+        from modules.Upscaler.upscaler import UpscalerTab
         if isinstance(current_tab, UpscalerTab):
             current_subtab = current_tab.tabs.currentWidget()
             tab_index = current_tab.tabs.currentIndex()

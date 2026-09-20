@@ -57,27 +57,22 @@ if %errorlevel% equ 0 (
     for /f "tokens=3" %%i in ('nvidia-smi ^| findstr "CUDA Version"') do set "CUDA_VERSION=%%i"
     echo Detected CUDA Version: %CUDA_VERSION%
 
-    :: Install appropriate PyTorch and ONNX Runtime version based on CUDA
-    if "%CUDA_VERSION:~0,4%" == "11.8" (
-        echo Installing PyTorch and ONNX Runtime with CUDA 11.8 support...
-        uv pip install --python "%VENV_PYTHON%" torch==2.0.1+cu118 torchvision==0.15.2+cu118 --index-url https://download.pytorch.org/whl/cu118
-        uv pip install --python "%VENV_PYTHON%" onnxruntime-gpu==1.16.3
-    ) else if "%CUDA_VERSION:~0,4%" == "11.7" (
-        echo Installing PyTorch with CUDA 11.7 support...
-        uv pip install --python "%VENV_PYTHON%" torch==2.0.1+cu117 torchvision==0.15.2+cu117 --index-url https://download.pytorch.org/whl/cu117
-        uv pip install --python "%VENV_PYTHON%" onnxruntime-gpu==1.16.1
-    ) else (
-        echo CUDA version not explicitly supported, defaulting to CUDA 11.8...
-        uv pip install --python "%VENV_PYTHON%" torch==2.0.1+cu118 torchvision==0.15.2+cu118 --index-url https://download.pytorch.org/whl/cu118
-    )
+    :: cu126 build: forward-compatible with the machine's CUDA 12.8/13.1 toolkits; onnxruntime-gpu comes from requirements.txt
+    echo Installing PyTorch with CUDA 12.6 support...
+    uv pip install --python "%VENV_PYTHON%" torch==2.14.0+cu126 torchvision==0.29.0+cu126 --index-url https://download.pytorch.org/whl/cu126
 ) else (
     echo No NVIDIA GPU detected, installing CPU-only versions...
-    uv pip install --python "%VENV_PYTHON%" torch==2.0.1+cpu torchvision==0.15.2+cpu --index-url https://download.pytorch.org/whl/cpu
+    uv pip install --python "%VENV_PYTHON%" torch==2.14.0+cpu torchvision==0.29.0+cpu --index-url https://download.pytorch.org/whl/cpu
 )
 
 :: Install other requirements from requirements.txt
 echo Installing other requirements from requirements.txt...
 uv pip install --python "%VENV_PYTHON%" -r "%SCRIPT_DIR%requirements.txt"
+
+:: Re-pin torch/torchvision to the cu126 build: diffusers/transformers/peft depend on an
+:: unpinned torch, so the requirements step above upgrades it to the latest PyPI wheel.
+:: (This is the "re-pin AFTER this file" mentioned in requirements.txt.)
+uv pip install --python "%VENV_PYTHON%" torch==2.14.0+cu126 torchvision==0.29.0+cu126 --index-url https://download.pytorch.org/whl/cu126
 
 :: Create launch script if it doesn't exist
 if not exist "%SCRIPT_DIR%\start.bat" (

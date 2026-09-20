@@ -1,13 +1,31 @@
-PySide6==6.5.2
-Pillow==10.0.0
-numpy==1.24.3
-opencv-python==4.8.0.76
-imagehash==4.3.1
-requests==2.31.0
-Send2Trash==1.8.2
-pandas
-huggingface_hub
-onnx==1.16.1
-onnxruntime-gpu==1.17.1
-colorama
-tqdm
+PySide6==6.11.2
+Pillow==12.3.0
+numpy==2.4.6
+opencv-python==4.14.0.94
+imagehash==4.3.2
+requests==2.34.2
+Send2Trash==2.1.0
+pandas==3.0.6
+huggingface_hub==0.36.2
+onnx==1.23.0
+onnxruntime-gpu==1.30.0
+colorama==0.4.6
+tqdm==4.70.1
+# SeedVR2 upscaler (modules/Upscaler/seedvr2_upscaler.py + vendored modules/Upscaler/seedvr2)
+# NOTE: torch/torchvision are NOT listed here on purpose. install.bat installs
+# torch==2.14.0+cu126 and re-pins it AFTER this file, because diffusers/transformers/
+# peft depend on an unpinned torch - without the re-pin, uv would replace the cu126
+# build with the latest PyPI wheel, which breaks DLL loading and kills CUDA.
+# Do not add torch here (and do not add --index-url/--extra-index-url: the pytorch
+# index also hosts unrelated packages like `requests`, which breaks uv's
+# first-index-wins strategy).
+einops==0.8.2
+omegaconf==2.3.1
+diffusers==0.39.0
+# transformers 5.x changes the import surface that SeedVR2's vendored code expects;
+# pin to the latest 4.x release (works fine with torch 2.14).
+transformers==4.57.6
+peft==0.21.0
+rotary_embedding_torch==0.9.1
+safetensors==0.8.0
+psutil==7.2.2

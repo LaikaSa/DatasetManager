@@ -1,14 +1,16 @@
 import sys
-from PySide6.QtWidgets import QApplication, QMainWindow, QTabWidget
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QDragMoveEvent
+from PySide6.QtWidgets import (QApplication, QMainWindow, QTabWidget, QMenu,
+                              QToolButton)
+from PySide6.QtGui import QDragEnterEvent, QDropEvent, QDragMoveEvent, QAction
 from PySide6.QtCore import Qt, QSettings
 from modules.duplicate_detector import DuplicateDetectorTab
 from modules.image_resizer import ImageResizerTab
-from modules.upscaler import UpscalerTab
+from modules.Upscaler.upscaler import UpscalerTab
 from modules.logger import setup_logger
 from modules.caption_generator import CaptionGeneratorTab
 from modules.tag_editor import TagEditorTab
 from modules.Conversion_Tools import ConversionTab
+from modules import settings as app_settings
 import os  # Add this for path operations
 logger = setup_logger()
 
@@ -50,6 +52,42 @@ class MainWindow(QMainWindow):
 
         # Persist the new order whenever the user drags a tab into place
         self.tabs.tabBar().tabMoved.connect(self._save_tab_order)
+
+        # Settings cog (top-right): choose the compute device for models
+        self._build_settings_button()
+
+    def _build_settings_button(self):
+        """Create the settings cog in the menu-bar corner with a device picker."""
+        self.menuBar().setNativeMenuBar(False)
+        self._settings_button = QToolButton()
+        self._settings_button.setIcon(app_settings.create_settings_icon())
+        self._settings_button.setToolTip("Settings - choose compute device (GPU/CPU)")
+        self._settings_button.setPopupMode(QToolButton.InstantPopup)
+        self._device_menu = QMenu(self._settings_button)
+        self._settings_button.setMenu(self._device_menu)
+        self.menuBar().setCornerWidget(self._settings_button, Qt.Corner.TopRightCorner)
+        self._rebuild_device_menu()
+
+    def _rebuild_device_menu(self):
+        """(Re)populate the device menu, checking the currently selected one."""
+        self._device_menu.clear()
+        header = self._device_menu.addAction("Compute device")
+        header.setEnabled(False)
+
+        selected = app_settings.get_selected_device_id()
+        for dev in app_settings.list_devices():
+            action = QAction(dev["label"], self._device_menu)
+            action.setCheckable(True)
+            action.setChecked(dev["id"] == selected)
+            action.triggered.connect(
+                lambda checked=False, d=dev: self._select_device(d["id"])
+            )
+            self._device_menu.addAction(action)
+
+    def _select_device(self, device_id):
+        app_settings.set_selected_device_id(device_id)
+        logger.info("Compute device set to: %s", app_settings.device_label(device_id))
+        self._rebuild_device_menu()
 
     def _add_tabs_in_saved_order(self):
         """Add tabs using the order saved from a previous session, if any."""

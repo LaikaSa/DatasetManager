@@ -4,7 +4,8 @@ from PySide6.QtCore import Qt
 from .gallery_view import GalleryView
 from .tag_panel import TagPanel
 from .data_model import DataModel
-from .loading_thread import LoadingThread 
+from .loading_thread import LoadingThread
+from .parallel_loader import ParallelLoader
 import os
 import shutil
 from send2trash import send2trash
@@ -128,15 +129,27 @@ class TagEditorTab(QWidget):
             self.path_input.setText(folder)
 
     def load_folder(self):
+        # Re-entrancy guard: the auto-reload after delete/move/save takes a
+        # few seconds. A second click (or a second delete) in that window
+        # used to spawn a second LoadingThread, which destroyed the first
+        # one mid-load ("QThread: Destroyed while thread is still running")
+        # and left the gallery showing a stale file list.
+        if self.loading_thread is not None and self.loading_thread.isRunning():
+            self.status_label.setText("Load already in progress...")
+            return
+
         folder = self.path_input.text()
         if not folder or not os.path.exists(folder):
             self.status_label.setText("Invalid folder path")
             return
 
-        # Disable controls during loading
+        # Disable controls during loading (Delete/Move included, so they can't
+        # run against a stale gallery while the reload is in flight)
         self.load_btn.setEnabled(False)
         self.unload_btn.setEnabled(False)
         self.parallel_cb.setEnabled(False)
+        self.tag_panel.delete_move_tab.delete_btn.setEnabled(False)
+        self.tag_panel.delete_move_tab.move_btn.setEnabled(False)
         self.status_label.setText("Loading...")
 
         # Start loading thread
@@ -150,20 +163,29 @@ class TagEditorTab(QWidget):
         self.status_label.setText(message)
 
     def on_loading_finished(self, result):
-        """Handle completion of loading thread"""
+        """Handle completion of loading thread (main thread)."""
         if result is None:
             self.status_label.setText("Error loading folder")
         else:
-            # Process results
+            # Replace whatever is shown: re-loading a folder (e.g. right after
+            # delete/move, which reloads to refresh) must not keep stale entries.
+            self.data_model.clear()
+            # Worker threads deliver plain numpy arrays; QPixmap is a GUI
+            # object, so build it here on the main thread.
             for item in result['results']:
-                self.data_model.add_image(item)
-            
+                thumbnail = ParallelLoader.array_to_pixmap(item['array'])
+                self.data_model.add_image({
+                    'path': item['path'],
+                    'tags': item['tags'],
+                    'thumbnail': thumbnail,
+                })
+
             # Update UI
             images = list(self.data_model.images.values())
             self.gallery.display_images(images)
             self.tag_panel.update_tags(self.data_model.tag_frequencies)
             self.tag_panel.update_counter(len(images), len(images))
-            
+
             self.status_label.setText(
                 f"Loaded {len(images)} images in {result['time']:.2f} seconds"
             )
@@ -172,10 +194,15 @@ class TagEditorTab(QWidget):
         self.load_btn.setEnabled(True)
         self.unload_btn.setEnabled(True)
         self.parallel_cb.setEnabled(True)
+        self.tag_panel.delete_move_tab.delete_btn.setEnabled(True)
+        self.tag_panel.delete_move_tab.move_btn.setEnabled(True)
 
     def unload_folder(self):
         """Unload current folder and clear all data"""
         print("Unloading folder...")  # Debug print
+        # Don't clear out from under a running load thread
+        if self.loading_thread is not None and self.loading_thread.isRunning():
+            self.loading_thread.wait(5000)
         self.data_model.clear()
         self.gallery.clear()
         self.tag_panel.clear()
@@ -215,31 +242,21 @@ class TagEditorTab(QWidget):
             self.gallery.display_images(list(self.data_model.images.values()))
             self.tag_panel.update_counter(len(self.data_model.images), len(self.data_model.images))
 
-    def apply_filters(self, tags: set, combine_logic: str, filter_logic: str):
-        print(f"Applying filters: {len(tags)} tags, {combine_logic}, {filter_logic}")
-        filtered_paths = self.data_model.filter_images(tags, combine_logic, filter_logic)
-        filtered_images = [self.data_model.images[path] for path in filtered_paths]
-        
-        # Update gallery with filtered images
-        self.gallery.display_images(filtered_images)
-        
-        # Update counter
-        self.tag_panel.update_counter(len(filtered_images), len(self.data_model.images))
-
-    def queue_tag_removal(self, tags):
-        """Queue tags for removal"""
-        self.tags_to_remove.update(tags)
-        self.save_btn.setEnabled(True)
-
     def delete_files(self, delete_images: bool, delete_captions: bool):
         """Move files to recycle bin"""
         current_images = [img.path for img in self.gallery.get_visible_images()]
         
         deleted_images = 0
         deleted_captions = 0
+        missing_images = 0
 
         for img_path in current_images:
             if delete_images:
+                # Skip files that are already gone (e.g. stale gallery list)
+                # instead of raising one exception per file.
+                if not os.path.exists(img_path):
+                    missing_images += 1
+                    continue
                 try:
                     send2trash(img_path)  # Send to recycle bin instead of permanent deletion
                     deleted_images += 1
@@ -257,7 +274,8 @@ class TagEditorTab(QWidget):
 
         # Reload folder to reflect changes
         self.load_folder()
-        print(f"Moved {deleted_images} images and {deleted_captions} caption files to recycle bin")
+        print(f"Moved {deleted_images} images and {deleted_captions} caption files to recycle bin"
+              + (f" (skipped {missing_images} files that no longer exist)" if missing_images else ""))
 
     def move_files(self, destination: str, move_images: bool, move_captions: bool):
         """Move displayed files"""
@@ -265,9 +283,13 @@ class TagEditorTab(QWidget):
         
         moved_images = 0
         moved_captions = 0
+        missing_images = 0
 
         for img_path in current_images:
             if move_images:
+                if not os.path.exists(img_path):
+                    missing_images += 1
+                    continue
                 try:
                     new_img_path = os.path.join(destination, os.path.basename(img_path))
                     shutil.move(img_path, new_img_path)
@@ -290,7 +312,8 @@ class TagEditorTab(QWidget):
 
         # Reload folder to reflect changes
         self.load_folder()
-        print(f"Moved {moved_images} images and {moved_captions} caption files")
+        print(f"Moved {moved_images} images and {moved_captions} caption files"
+              + (f" (skipped {missing_images} files that no longer exist)" if missing_images else ""))
 
     def save_changes(self):
         """Save all pending changes"""

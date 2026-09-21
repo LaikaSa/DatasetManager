@@ -21,8 +21,8 @@ class DataModel:
         self.modified_files: Set[str] = set()
         self.parallel_loader = ParallelLoader()
 
-    def filter_images(self, tags: Set[str], combine_logic: str = "AND", 
-                     filter_logic: str = "POSITIVE") -> List[str]:
+    def filter_images(self, tags: Set[str], combine_logic: str = "AND",
+                     filter_logic: str = "POSITIVE") -> List[ImageData]:
         """Filter images based on tags and logic"""
         print(f"Filtering with {len(tags)} tags using {combine_logic} logic and {filter_logic} mode")
         print(f"Tags to filter: {tags}")
@@ -214,16 +214,27 @@ class DataModel:
             self.tag_frequencies.update(image_data.tags)
         print(f"Updated tag frequencies: {len(self.tag_frequencies)} unique tags")
 
-    def update_image_tags(self, image_path: str, new_tags: set):
-        """Update tags for an image"""
-        print(f"Updating tags for {image_path}")
-        print(f"New tags: {new_tags}")
+    def update_image_tags(self, image_path: str, new_tags):
+        """Update tags for an image.
+
+        Frequencies are adjusted incrementally instead of recomputing the
+        Counter over the whole dataset - this method fires on every caption
+        edit keystroke, and a full recompute per keystroke is O(dataset)."""
         if image_path in self.images:
             image_data = self.images[image_path]
-            image_data.tags = new_tags
+            old_tags = image_data.tags
+            image_data.tags = list(new_tags)
             image_data.modified = True
             self.modified_files.add(image_path)
-            self.update_tag_frequencies()
+
+            for tag in old_tags:
+                if self.tag_frequencies[tag] > 0:
+                    self.tag_frequencies[tag] -= 1
+            for tag in image_data.tags:
+                self.tag_frequencies[tag] += 1
+            # Drop zeroed entries so the filter list stays clean
+            for tag in [t for t, c in self.tag_frequencies.items() if c <= 0]:
+                del self.tag_frequencies[tag]
 
     def save_changes(self, create_backup: bool = False) -> tuple[int, int]:
         saved_count = 0

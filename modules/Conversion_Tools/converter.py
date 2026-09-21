@@ -18,15 +18,6 @@ class ImageConverter:
         }
         self.image_extensions = ('.png', '.jpg', '.jpeg', '.bmp', '.webp')
 
-    def print_progress_bar(self, current, total, bar_length=50):
-        progress = float(current) / total
-        filled_length = int(bar_length * progress)
-        bar = '=' * filled_length + '-' * (bar_length - filled_length)
-        sys.stdout.write(f'\r[{bar}] {current}/{total}')
-        sys.stdout.flush()
-        if current == total:
-            print()  # New line when complete
-
     def convert_folder(self, folder_path, target_format, recursive=False, use_parallel=False, stop_check=None):
         """Convert all images in a folder to the target format."""
         try:
@@ -59,24 +50,28 @@ class ImageConverter:
 
             # Convert files
             if use_parallel:
+                # Submit in chunks so a Stop is honored between chunks instead
+                # of after the entire (possibly huge) backlog is queued.
+                chunk = 64
                 with ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-                    futures = []
-                    for root, file in files_to_convert:
+                    for start in range(0, total_files, chunk):
                         if stop_check and stop_check():
                             print("\nConversion stopped by user")
                             break
-                        file_path = os.path.join(root, file)
-                        futures.append(
-                            executor.submit(self._convert_image, file_path, target_format)
-                        )
-                    
-                    # Wait for all conversions to complete
-                    for future in futures:
-                        try:
-                            future.result()
-                            update_progress()
-                        except Exception as e:
-                            logger.error(f"Error in parallel conversion: {str(e)}")
+                        chunk_paths = [
+                            os.path.join(root, file)
+                            for root, file in files_to_convert[start:start + chunk]
+                        ]
+                        futures = [
+                            executor.submit(self._convert_image, p, target_format)
+                            for p in chunk_paths
+                        ]
+                        # Wait for this chunk to complete
+                        for future in futures:
+                            try:
+                                future.result()
+                            except Exception as e:
+                                logger.error(f"Error in parallel conversion: {str(e)}")
                             update_progress()
             else:
                 # Sequential processing
@@ -121,7 +116,10 @@ class ImageConverter:
                     elif img.mode != 'RGB':
                         img = img.convert('RGB')
                 
-                img.save(new_path, self.supported_formats[target_format])
+                # quality=95 matches the resizer tab; PIL's default (75) was
+                # visibly softer than the rest of the app's output
+                save_kwargs = {'quality': 95} if target_format.lower() in ('jpeg', 'png') else {}
+                img.save(new_path, self.supported_formats[target_format], **save_kwargs)
                 os.remove(image_path)
                 
         except Exception as e:

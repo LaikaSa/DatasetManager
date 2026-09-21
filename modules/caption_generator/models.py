@@ -1,5 +1,4 @@
 import onnxruntime
-import onnx
 import numpy as np
 import os
 import multiprocessing
@@ -87,13 +86,9 @@ class ImageCaptioner:
 
     def create_session(self, model_path, device_id=None):
         try:
-            import onnx
             import onnxruntime as ort
-            
+
             print(f"Loading ONNX model: {model_path}")
-            model = onnx.load(model_path)
-            input_name = model.graph.input[0].name
-            self.input_name = input_name
 
             print(f"Available providers: {ort.get_available_providers()}")
             
@@ -111,8 +106,22 @@ class ImageCaptioner:
                 provider_options.append({
                     'device_id': device_id,
                     'arena_extend_strategy': 'kNextPowerOfTwo',
-                    'gpu_mem_limit': 4 * 1024 * 1024 * 1024,
-                    'cudnn_conv_algo_search': 'EXHAUSTIVE',
+                    # No gpu_mem_limit: the old 4 GB cap made the BFC arena
+                    # OOM at the first node of a batch as soon as the arena's
+                    # high-water mark hit the cap ("Available memory of 0 is
+                    # smaller than requested bytes of 6400") - typically at
+                    # batch 6 once other app modules also held VRAM. Measured
+                    # on an RTX 3090 (wd-eva02-large, 448x448 input):
+                    #   - 4 GB cap  -> max batch 14 (clean), 6 with 3 GB busy
+                    #   - no cap   -> max batch 56 (~16.9 GB used)
+                    # The arena grows to the largest batch and never shrinks,
+                    # so leaving headroom for the other in-app models is fine.
+
+                    # HEURISTIC avoids the long EXHAUSTIVE autotuning stall on first
+                    # inference (the original goal) while still using a proper cuDNN
+                    # algo. (DEFAULT = cuDNN FALLBACK mode, which logs a scary
+                    # "running in Fallback mode" warning and can be slow.)
+                    'cudnn_conv_algo_search': 'HEURISTIC',
                 })
             elif use_cuda:
                 print(f"CUDA requested (GPU {device_id}) but CUDAExecutionProvider is "
@@ -124,16 +133,20 @@ class ImageCaptioner:
             
             print(f"Using providers: {providers}")
             print(f"With options: {provider_options}")
-            
-            # Create session
+
+            # Create session (no separate onnx.load just to read the input
+            # name - the session exposes it directly, which skips parsing
+            # the full protobuf a second time)
             session = ort.InferenceSession(
                 model_path,
                 sess_options=session_options,
                 providers=providers,
                 provider_options=provider_options
             )
-            
+            self.input_name = session.get_inputs()[0].name
+
             print(f"Session created successfully with active providers: {session.get_providers()}")
+            print(f"Input name: {self.input_name}")
             return session
 
         except Exception as e:
@@ -153,6 +166,19 @@ class ImageCaptioner:
             except Exception as fallback_e:
                 print(f"Fallback also failed: {fallback_e}")
                 return None
+
+    def predict_batch(self, images):
+        """Run one batched inference over a list of prepared image arrays.
+
+        A single session.run over a stacked batch is much faster than one
+        run per image. Returns the (B, num_tags) logit matrix.
+
+        The WD-tagger models take (N, H, W, 3) inputs, so the (1, H, W, 3)
+        arrays from prepare_image() are concatenated along the batch axis.
+        """
+        label_name = self.session.get_outputs()[0].name
+        stacked = np.concatenate([np.asarray(im, dtype=np.float32) for im in images], axis=0)
+        return self.session.run([label_name], {self.input_name: stacked})[0]
             
     def generate_caption(self, image_path, 
                         general_threshold=0.35, 
@@ -183,12 +209,30 @@ class ImageCaptioner:
                 image = self.prepare_image(image_path)
             else:
                 image = image_path
-                
+
             # 3. Model Inference
             label_name = self.session.get_outputs()[0].name
             preds = self.session.run([label_name], {self.input_name: image})[0]
-            labels = list(zip(self.tag_names, preds[0].astype(float)))
-            
+            return self.caption_from_preds(preds[0].astype(float),
+                                           general_threshold, character_threshold,
+                                           remove_underscore, undesired_tags,
+                                           always_first_tags, caption_separator,
+                                           include_rating)
+
+        except Exception as e:
+            error_msg = f"Error generating caption for {image_path}: {e}"
+            logger.error(error_msg)  # Errors always logged regardless of debug mode
+            return None
+
+    def caption_from_preds(self, logit_row, general_threshold, character_threshold,
+                           remove_underscore, undesired_tags, always_first_tags,
+                           caption_separator, include_rating):
+        """Turn one raw logit row (from a single or batched inference) into a
+        caption string. Shared by generate_caption() and the batched loop in
+        processing.py."""
+        try:
+            labels = list(zip(self.tag_names, logit_row))
+
             # 4. Tag Processing
             combined_tags = []
             
@@ -263,13 +307,12 @@ class ImageCaptioner:
             if self.debug_mode:
                 logger.debug(f"Final caption ({len(combined_tags)} tags):")
                 logger.debug(caption)
-            
+
             return caption
-            
+
         except Exception as e:
-            error_msg = f"Error generating caption for {image_path}: {e}"
-            logger.error(error_msg)  # Errors always logged regardless of debug mode
-            return "error_generating_caption"
+            logger.error(f"Error building caption from predictions: {e}")
+            return None
 
     def prepare_image(self, image_path):
         # Load image

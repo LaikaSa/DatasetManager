@@ -1,5 +1,5 @@
 from PySide6.QtCore import QThread, Signal, Qt
-from PySide6.QtGui import QPixmap
+import numpy as np
 from pathlib import Path
 from .parallel_loader import ParallelLoader
 import time
@@ -38,15 +38,24 @@ class LoadingThread(QThread):
         except Exception as e:
             self.progress.emit(f"Error during loading: {str(e)}")
             self.finished.emit(None)
+        finally:
+            # The Pool is created inside this QThread, so it must be stopped
+            # from the same thread. Stopping it here means workers exit
+            # cleanly even if a later action replaces/destroys this thread
+            # (previously the pool was GC-terminated mid-map, producing
+            # BrokenPipeError tracebacks in the SpawnPoolWorker processes).
+            self.parallel_loader.stop_pool()
 
     def load_sequential(self):
         results = []
         valid_extensions = {'.png', '.jpg', '.jpeg', '.bmp'}
-        files = [f for f in Path(self.directory).glob("*.*") 
+        files = [f for f in Path(self.directory).glob("*.*")
                 if f.suffix.lower() in valid_extensions]
-        
+
         total_files = len(files)
         self.progress.emit(f"Found {total_files} files to process")
+
+        from PIL import Image
 
         for i, file_path in enumerate(files):
             if i % 10 == 0:  # Update progress every 10 files
@@ -54,7 +63,7 @@ class LoadingThread(QThread):
 
             image_path = str(file_path)
             tag_path = file_path.with_suffix('.txt')
-            
+
             try:
                 # Load tags (preserve order, drop duplicates)
                 tags = []
@@ -64,20 +73,21 @@ class LoadingThread(QThread):
                         for tag in f.read().split(','):
                             tag = tag.strip().lower()
                             if tag and tag not in seen:
-                                seen.add(tag)
                                 tags.append(tag)
 
-                # Create thumbnail
-                thumbnail = QPixmap(image_path)
-                thumbnail = thumbnail.scaled(
-                    150, 150,
-                    Qt.AspectRatioMode.KeepAspectRatio,
-                    Qt.TransformationMode.SmoothTransformation
-                )
+                # Decode to an RGB array (same shape as the parallel path).
+                # QPixmap creation happens on the main thread afterwards -
+                # GUI objects shouldn't be built on worker threads.
+                with Image.open(image_path) as img:
+                    if img.mode != 'RGB':
+                        img = img.convert('RGB')
+                    ratio = min(150 / img.width, 150 / img.height)
+                    new_size = (max(1, int(img.width * ratio)), max(1, int(img.height * ratio)))
+                    img_array = np.array(img.resize(new_size, Image.Resampling.LANCZOS))
 
                 results.append({
                     'path': image_path,
-                    'thumbnail': thumbnail,
+                    'array': img_array,
                     'tags': tags
                 })
 

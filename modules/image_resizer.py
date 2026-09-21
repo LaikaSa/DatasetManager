@@ -2,7 +2,7 @@ import os
 from PIL import Image
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
                               QFileDialog, QProgressBar, QHBoxLayout, 
-                              QSpinBox, QLineEdit, QScrollArea)
+                              QSpinBox, QLineEdit, QTextEdit)
 from PySide6.QtCore import Qt, QThread, Signal
 
 class ResizeWorker(QThread):
@@ -18,7 +18,10 @@ class ResizeWorker(QThread):
 
     def run(self):
         image_files = []
-        for root, _, files in os.walk(self.folder_path):
+        for root, dirs, files in os.walk(self.folder_path):
+            # Never descend into our own output folders (a re-run with a lower
+            # max resolution would otherwise nest resized/resized/...)
+            dirs[:] = [d for d in dirs if d != 'resized']
             for file in files:
                 if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
                     image_files.append(os.path.join(root, file))
@@ -121,14 +124,11 @@ class ImageResizerTab(QWidget):
         # Progress bar
         self.progress_bar = QProgressBar()
 
-        # Status text area
-        self.status_area = QScrollArea()
-        self.status_area.setWidgetResizable(True)
-        self.status_text = QLabel()
-        self.status_text.setAlignment(Qt.AlignTop)
-        self.status_text.setWordWrap(True)
-        self.status_area.setWidget(self.status_text)
-        self.status_area.setMinimumHeight(200)
+        # Status text area. QTextEdit.append() is O(line) - rebuilding one
+        # growing QLabel string per file was O(n^2) for large folders.
+        self.status_text = QTextEdit()
+        self.status_text.setReadOnly(True)
+        self.status_text.setMinimumHeight(200)
 
         # Add widgets to layout
         layout.addLayout(folder_layout)
@@ -137,7 +137,7 @@ class ImageResizerTab(QWidget):
         layout.addWidget(description)
         layout.addLayout(button_layout)
         layout.addWidget(self.progress_bar)
-        layout.addWidget(self.status_area)
+        layout.addWidget(self.status_text)
 
         # Connect signals
         self.browse_btn.clicked.connect(self.browse_folder)
@@ -177,7 +177,7 @@ class ImageResizerTab(QWidget):
         self.stop_btn.setEnabled(True)
         self.browse_btn.setEnabled(False)
         self.folder_path_input.setEnabled(False)
-        self.status_text.setText("")
+        self.status_text.clear()
         
         self.worker.start()
 
@@ -188,8 +188,7 @@ class ImageResizerTab(QWidget):
             self.resize_finished()
 
     def update_status(self, text):
-        current_text = self.status_text.text()
-        self.status_text.setText(current_text + "\n" + text if current_text else text)
+        self.status_text.append(text)
 
     def resize_finished(self):
         self.start_btn.setEnabled(True)

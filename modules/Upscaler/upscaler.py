@@ -84,12 +84,62 @@ class RDB(nn.Module):
         x5 = self.conv5(torch.cat((x, x1, x2, x3, x4), 1))
         return x5 * 0.2 + x
 
+class ModelDownloadWorker(QThread):
+    """Downloads the RealESRGAN weights off the GUI thread into a .part file,
+    then renames it into place, so an interrupted download can never leave a
+    partial file behind that looks like a valid model."""
+
+    status = Signal(str)
+    finished_ok = Signal(bool)
+
+    def __init__(self, url, dest_path):
+        super().__init__()
+        self.url = url
+        self.dest_path = dest_path
+        self.is_running = True
+
+    def run(self):
+        part_path = self.dest_path + '.part'
+        try:
+            response = requests.get(self.url, stream=True)
+            response.raise_for_status()
+            total = int(response.headers.get('content-length', 0))
+            downloaded = 0
+            with open(part_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=1 << 20):
+                    if not self.is_running:
+                        break
+                    if chunk:
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                    if total:
+                        self.status.emit(
+                            f"Downloading model... {downloaded >> 20} / {total >> 20} MB"
+                        )
+            if self.is_running:
+                os.replace(part_path, self.dest_path)
+                self.finished_ok.emit(True)
+            else:
+                self.finished_ok.emit(False)
+        except Exception as e:
+            self.status.emit(f"Download failed: {str(e)}")
+            self.finished_ok.emit(False)
+        finally:
+            if os.path.exists(part_path):
+                try:
+                    os.remove(part_path)
+                except OSError:
+                    pass
+
+
 class UpscaleWorker(QThread):
     progress = Signal(int)
     status = Signal(str)
     finished = Signal()
+    model_loaded = Signal(object)  # lets the tab cache the model between runs
 
-    def __init__(self, input_paths, model_path, scale_factor, device=None):
+    def __init__(self, input_paths, model_path, scale_factor, device=None,
+                 model=None, owns_model=True):
         super().__init__()
         self.input_paths = input_paths if isinstance(input_paths, list) else [input_paths]
         self.model_path = model_path
@@ -99,7 +149,8 @@ class UpscaleWorker(QThread):
             self.device = device
         else:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.model = None
+        self.model = model  # preloaded (tab-cached) model, if any
+        self.owns_model = owns_model  # False when the tab keeps the model
         self.tile_size = 512
         self.tile_pad = 32
 
@@ -138,6 +189,7 @@ class UpscaleWorker(QThread):
             model.load_state_dict(state_dict)
             model.eval()
             self.model = model.to(self.device)
+            self.model_loaded.emit(self.model)
         return self.model
 
     def process_tile(self, tile, scale):
@@ -164,10 +216,10 @@ class UpscaleWorker(QThread):
     def process_image(self, img_path):
         try:
             img = Image.open(img_path).convert('RGB')
-            
+
             # Calculate output size aligned to 8 pixels
-            dest_w = int((img.width * self.scale_factor) // 8 * 8)
-            dest_h = int((img.height * self.scale_factor) // 8 * 8)
+            dest_w = max(8, int((img.width * self.scale_factor) // 8 * 8))
+            dest_h = max(8, int((img.height * self.scale_factor) // 8 * 8))
 
             # Calculate tile dimensions
             tile_w = min(self.tile_size, img.width)
@@ -176,40 +228,79 @@ class UpscaleWorker(QThread):
             # If image is small enough, process it directly
             if img.width <= self.tile_size and img.height <= self.tile_size:
                 output_img = self.process_tile(img, self.scale_factor)
+                if output_img.size != (dest_w, dest_h):
+                    output_img = output_img.resize((dest_w, dest_h), Image.Resampling.LANCZOS)
             else:
-                # Calculate total tiles for progress
-                total_tiles = ((img.height + tile_h - self.tile_pad - 1) // (tile_h - self.tile_pad)) * \
-                                ((img.width + tile_w - self.tile_pad - 1) // (tile_w - self.tile_pad))
+                # Tiled path: accumulate into a float buffer and blend the
+                # overlap region with linear ramps (plain paste() left visible
+                # seams at tile borders).
+                out = np.zeros((dest_h, dest_w, 3), dtype=np.float32)
+                weight = np.zeros((dest_h, dest_w), dtype=np.float32)
+
+                step_w = max(1, tile_w - self.tile_pad)
+                step_h = max(1, tile_h - self.tile_pad)
+                total_tiles = ((img.height - 1) // step_h + 1) * ((img.width - 1) // step_w + 1)
                 current_tile = 0
-                
+
+                pad_w_out = int(self.tile_pad * self.scale_factor)
+                pad_h_out = int(self.tile_pad * self.scale_factor)
+
                 # Print initial tile progress bar
                 print('')  # Empty line for progress bar
-                
-                # Process image in tiles
-                output_img = Image.new('RGB', (dest_w, dest_h))
-                for y in range(0, img.height, tile_h - self.tile_pad):
-                    for x in range(0, img.width, tile_w - self.tile_pad):
+
+                for y in range(0, img.height, step_h):
+                    for x in range(0, img.width, step_w):
                         if not self.is_running:
                             return False
-                        
+
                         # Extract and process tile
                         right = min(x + tile_w, img.width)
                         bottom = min(y + tile_h, img.height)
                         tile = img.crop((x, y, right, bottom))
                         processed_tile = self.process_tile(tile, self.scale_factor)
-                        
-                        # Paste tile
-                        paste_x = int(x * self.scale_factor)
-                        paste_y = int(y * self.scale_factor)
-                        output_img.paste(processed_tile, (paste_x, paste_y))
+
+                        # Target region in output space, at its exact size so
+                        # non-integer scale factors can't leave 1px gaps.
+                        tx = int(round(x * self.scale_factor))
+                        ty = int(round(y * self.scale_factor))
+                        tw = min(int(round((right - x) * self.scale_factor)), dest_w - tx)
+                        th = min(int(round((bottom - y) * self.scale_factor)), dest_h - ty)
+                        if processed_tile.size != (tw, th):
+                            processed_tile = processed_tile.resize((tw, th), Image.Resampling.LANCZOS)
+
+                        # Linear ramps over the overlap, disabled at the
+                        # image borders where there is no neighbour tile.
+                        wx = np.ones(tw, dtype=np.float32)
+                        if x > 0 and pad_w_out > 0:
+                            r = min(pad_w_out, tw)
+                            wx[:r] = np.linspace(0.0, 1.0, r, dtype=np.float32)
+                        if right < img.width and pad_w_out > 0:
+                            r = min(pad_w_out, tw)
+                            wx[tw - r:] = np.linspace(1.0, 0.0, r, dtype=np.float32)
+                        wy = np.ones(th, dtype=np.float32)
+                        if y > 0 and pad_h_out > 0:
+                            r = min(pad_h_out, th)
+                            wy[:r] = np.linspace(0.0, 1.0, r, dtype=np.float32)
+                        if bottom < img.height and pad_h_out > 0:
+                            r = min(pad_h_out, th)
+                            wy[th - r:] = np.linspace(1.0, 0.0, r, dtype=np.float32)
+
+                        w2 = wy[:, None] * wx[None, :]
+                        out[ty:ty + th, tx:tx + tw] += np.asarray(
+                            processed_tile, dtype=np.float32) * w2[:, :, None]
+                        weight[ty:ty + th, tx:tx + tw] += w2
 
                         # Update tile progress
                         current_tile += 1
                         filled_length = int(50 * current_tile / total_tiles)
                         bar = '=' * filled_length + '-' * (50 - filled_length)
                         print(f'\033[1A\033[K' + f'Tiles: [{bar}] {current_tile}/{total_tiles}')
-                
+
                 print()  # New line after tiles complete
+
+                np.maximum(weight, 1e-6, out=weight)  # guard any uncovered pixel
+                out /= weight[:, :, None]
+                output_img = Image.fromarray(np.clip(out, 0, 255).astype(np.uint8))
 
             # Save the result
             output_path = os.path.join(
@@ -219,7 +310,7 @@ class UpscaleWorker(QThread):
             )
             os.makedirs(os.path.dirname(output_path), exist_ok=True)
             output_img.save(output_path)
-            
+
             return True
 
         except Exception as e:
@@ -270,7 +361,9 @@ class UpscaleWorker(QThread):
         self.is_running = False
 
     def clear_gpu_memory(self):
-        if self.model is not None:
+        # Only free the model when this worker owns it; tab-cached models
+        # are kept so the next run doesn't pay the load cost again.
+        if self.owns_model and self.model is not None:
             del self.model
             self.model = None
             if torch.cuda.is_available():
@@ -294,8 +387,15 @@ class InputWidget(QWidget):
         super().__init__()
         self.parent = parent
         self.selected_paths = []
+        self._size_cache = {}  # path -> (w, h); avoid re-opening files on every filter pass
         self.setAcceptDrops(True)
         self.init_ui()
+
+    def _get_size(self, p):
+        if p not in self._size_cache:
+            with Image.open(p) as img:
+                self._size_cache[p] = img.size
+        return self._size_cache[p]
 
     def init_ui(self):
         layout = QVBoxLayout(self)
@@ -366,6 +466,7 @@ class InputWidget(QWidget):
             and f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))
         ]
         self.selected_paths = sorted(files)
+        self._size_cache.clear()
         self.refresh_list()
         self.parent.check_input()
 
@@ -391,8 +492,7 @@ class InputWidget(QWidget):
 
         for p in paths:
             try:
-                with Image.open(p) as img:
-                    w, h = img.size
+                w, h = self._get_size(p)
                 res_str = f"{w}×{h}"
             except Exception:
                 res_str = "?"
@@ -423,10 +523,9 @@ class InputWidget(QWidget):
         out = []
         for p in paths:
             try:
-                with Image.open(p) as img:
-                    w, h = img.size
-                    if w < max_res and h < max_res:
-                        out.append(p)
+                w, h = self._get_size(p)
+                if w < max_res and h < max_res:
+                    out.append(p)
             except Exception:
                 pass
         return out
@@ -507,6 +606,7 @@ class InputWidget(QWidget):
             and u.toLocalFile().lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))
         ]
         if files:
+            self._size_cache.clear()
             self.selected_paths = files
             # Show the first path (or parent folder) in the text box
             if len(files) == 1:
@@ -526,6 +626,10 @@ class UpscalerTab(QWidget):
         super().__init__()
         self.worker = None
         self.model_path = None
+        # Cached RealESRGAN model so repeated runs skip torch.load + device
+        # transfer. Keyed by (model_path, device).
+        self._cached_model = None
+        self._cached_model_key = None
         self.init_ui()
 
     def init_ui(self):
@@ -640,6 +744,14 @@ class UpscalerTab(QWidget):
 
         self.check_model()
 
+    def _clear_cached_model(self):
+        if self._cached_model is not None:
+            del self._cached_model
+            self._cached_model = None
+            self._cached_model_key = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
     def toggle_resolution_filter(self, state):
         self.resolution_spin.setEnabled(bool(state))
         self.input_widget.update_list()
@@ -687,33 +799,31 @@ class UpscalerTab(QWidget):
             self.seedvr2_download.start()
             return
 
-        # Default RealESRGAN model (small, single file)
+        # Default RealESRGAN model (small, single file) - downloaded in a
+        # worker thread so the GUI stays responsive during the transfer.
         self._downloading = True
         self.download_btn.setEnabled(False)
         self.model_status.setText("Downloading model...")
-        try:
-            url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth"
-            root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-            model_dir = os.path.join(root_dir, "models")
-            os.makedirs(model_dir, exist_ok=True)
-            response = requests.get(url, stream=True)
-            response.raise_for_status()
-            with open(self.model_path, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    if chunk:
-                        f.write(chunk)
-        except Exception as e:
-            self.model_status.setText(f"Download failed: {str(e)}")
-        finally:
-            self._downloading = False
+        url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth"
+        os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
+        self.download_worker = ModelDownloadWorker(url, self.model_path)
+        self.download_worker.status.connect(self.model_status.setText)
+        self.download_worker.finished_ok.connect(self._realesrgan_download_done)
+        self.download_worker.start()
+
+    def _realesrgan_download_done(self, ok):
+        self._downloading = False
         self.refresh_model_row()
+        if not ok:
+            self.model_status.setText("Download failed")
+            self.download_btn.setEnabled(True)
 
     def _seedvr2_download_done(self, ok):
         self._downloading = False
-        if ok:
-            self.model_ready["seedvr2"] = True
-        self.model_status.setText("" if ok else "Download failed")
         self.refresh_model_row()
+        if not ok:
+            self.model_status.setText("Download failed")
+            self.download_btn.setEnabled(True)
 
     def start_upscale(self):
         if self.worker is not None and self.worker.isRunning():
@@ -735,8 +845,23 @@ class UpscalerTab(QWidget):
                 tile_vae=self.tile_check.isChecked(),
             )
         else:
-            self.worker = UpscaleWorker(input_paths, self.model_path, self.scale_spin.value(),
-                                        device=device)
+            # Reuse the cached model when model + device are unchanged
+            cache_key = (self.model_path, device)
+            if self._cached_model_key != cache_key:
+                self._clear_cached_model()
+            use_cached = self._cached_model_key == cache_key
+            self.worker = UpscaleWorker(
+                input_paths, self.model_path, self.scale_spin.value(),
+                device=device, model=self._cached_model,
+                owns_model=not use_cached,
+            )
+            self.worker.model_loaded.connect(self._on_model_loaded)
+
+    def _on_model_loaded(self, model):
+        """Cache a freshly loaded model for the next run."""
+        device = settings.to_torch_device(settings.get_selected_device_id())
+        self._cached_model = model
+        self._cached_model_key = (self.model_path, device)
 
         self.worker.status.connect(self.update_status)
         self.worker.finished.connect(self.upscale_finished)

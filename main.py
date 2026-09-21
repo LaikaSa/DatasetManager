@@ -59,7 +59,9 @@ class MainWindow(QMainWindow):
         self._device_menu = QMenu(self._settings_button)
         self._settings_button.setMenu(self._device_menu)
         self.menuBar().setCornerWidget(self._settings_button, Qt.Corner.TopRightCorner)
-        self._rebuild_device_menu()
+        # Rebuild lazily on first open: list_devices() imports torch, and we
+        # don't want that cost (or even the import) at startup.
+        self._device_menu.aboutToShow.connect(self._rebuild_device_menu)
 
     def _rebuild_device_menu(self):
         """(Re)populate the device menu, checking the currently selected one."""
@@ -165,14 +167,20 @@ class MainWindow(QMainWindow):
                 self.tab_keys[i] = key
         self.settings.setValue("tab_order", self.tab_keys)
 
+    def _current_tab_accepts_drops(self):
+        # Only the Upscaler tab has a dropEvent, so only show the "can drop"
+        # cursor over it - otherwise drops on other tabs are silently ignored.
+        from modules.Upscaler.upscaler import UpscalerTab
+        return isinstance(self.tabs.currentWidget(), UpscalerTab)
+
     def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasUrls() and self._current_tab_accepts_drops():
             event.accept()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
+        if event.mimeData().hasUrls() and self._current_tab_accepts_drops():
             event.accept()
         else:
             event.ignore()
@@ -211,8 +219,8 @@ class MainWindow(QMainWindow):
                 
                 if files:
                     current_subtab.selected_paths = files
-                    current_subtab.update_file_list()
-                    current_subtab.parent.check_input(files[0])
+                    current_subtab.refresh_list()
+                    current_subtab.parent.check_input()
                     event.accept()
 
 def main():

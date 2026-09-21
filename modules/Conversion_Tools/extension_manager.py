@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt
 import os
 import send2trash
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
 from ..logger import setup_logger
 
@@ -57,50 +57,17 @@ class ExtensionManagerTab(QWidget):
 
         self.setLayout(layout)
 
-    def scan_folder(self):
-        folder_path = self.folder_input.text()
-        folder_path = os.path.normpath(folder_path)
-        
-        if not folder_path or not os.path.exists(folder_path):
-            QMessageBox.warning(self, "Error", "Please select a valid folder first")
-            return
+    @staticmethod
+    def _classify_file(root, file):
+        """Pure (thread-safe) version of the old _process_file: returns the
+        (extension, normalized path) pair instead of mutating shared state -
+        a defaultdict mutated from several threads could lose entries in the
+        create-new-key race."""
+        file_path = os.path.normpath(os.path.join(root, file))
+        _, ext = os.path.splitext(file)
+        ext = ext.lower() if ext else "(no extension)"
+        return ext, file_path
 
-        self.extension_files.clear()
-        self.extensions_list.clear()
-        files_to_process = []
-
-        try:
-            # Use the shared recursive checkbox
-            if self.recursive_cb.isChecked():
-                for root, _, files in os.walk(folder_path):
-                    for file in files:
-                        files_to_process.append((root, file))
-            else:
-                for file in os.listdir(folder_path):
-                    file_path = os.path.join(folder_path, file)
-                    if os.path.isfile(file_path):
-                        files_to_process.append((folder_path, file))
-
-            # Update UI with results
-            for ext, files in sorted(self.extension_files.items()):
-                item_text = f"{ext} ({len(files)} files)"
-                self.extensions_list.addItem(item_text)
-
-            self.stats_label.setText(f"Total files: {total_files}")
-            self.remove_btn.setEnabled(True)
-
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Error scanning folder: {str(e)}")
-
-    def _process_file(self, root, file):
-        try:
-            # Use os.path.normpath to normalize the path
-            file_path = os.path.normpath(os.path.join(root, file))
-            _, ext = os.path.splitext(file)
-            ext = ext.lower() if ext else "(no extension)"
-            self.extension_files[ext].append(file_path)
-        except Exception as e:
-            logger.error(f"Error processing file {file}: {str(e)}")
 
     def select_all_extensions(self):
         for i in range(self.extensions_list.count()):
@@ -222,13 +189,18 @@ class ExtensionManagerTab(QWidget):
                     if os.path.isfile(file_path):
                         files_to_process.append((folder_path, file))
 
-            # Process files based on parallel checkbox
-            if self.parallel_cb.isChecked():
+            # Classify files (in parallel when asked), then aggregate on the
+            # main thread
+            if self.parallel_cb.isChecked() and len(files_to_process) > 1:
                 with ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
-                    executor.map(lambda x: self._process_file(*x), files_to_process)
+                    classified = list(executor.map(
+                        lambda x: self._classify_file(*x), files_to_process
+                    ))
             else:
-                for root, file in files_to_process:
-                    self._process_file(root, file)
+                classified = [self._classify_file(root, file) for root, file in files_to_process]
+
+            for ext, file_path in classified:
+                self.extension_files[ext].append(file_path)
 
             # Update UI with results
             for ext, files in sorted(self.extension_files.items()):

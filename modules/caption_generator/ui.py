@@ -2,11 +2,12 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
                               QFileDialog, QTextEdit, QMessageBox, QCheckBox,
                               QLineEdit, QComboBox, QHBoxLayout, QSlider,
                               QSpinBox)
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from .models import ImageCaptioner
 from .processing import CaptionGeneratorThread
 from .local_llm_captioner import LocalLLMCaptioner, NaturalLanguageCaptionThread
 import os
+import functools
 import multiprocessing
 from huggingface_hub import hf_hub_download
 try:
@@ -19,6 +20,57 @@ logger = setup_logger()
 
 NATURAL_LANGUAGE_OPTION = "Natural Language"
 DEFAULT_LOCAL_LLM_URL = "http://127.0.0.1:1234"
+
+
+class _HFProgressTqdm:
+    """Minimal tqdm stand-in for hf_hub_download that forwards coarse
+    percentage progress to a Qt signal callback."""
+
+    def __init__(self, callback, *args, **kwargs):
+        self._cb = callback
+        self._total = kwargs.get('total')
+        self._n = kwargs.get('initial', 0)
+        self._last = -1
+
+    def update(self, n=1):
+        self._n += n
+        if self._total:
+            pct = int(self._n * 100 / self._total)
+            if pct != self._last:
+                self._last = pct
+                self._cb(f"Downloading... {pct}% ({self._n >> 20} / {self._total >> 20} MB)")
+
+    def close(self):
+        pass
+
+
+class TagModelDownloadThread(QThread):
+    """Downloads WD-tagger files off the GUI thread (model.onnx is ~1.7 GB -
+    doing this on the main thread froze the whole app)."""
+
+    status = Signal(str)
+    finished_ok = Signal(bool)
+
+    def __init__(self, repo_id, files):
+        super().__init__()
+        self.repo_id = repo_id
+        self.files = files
+
+    def run(self):
+        try:
+            for file in self.files:
+                self.status.emit(f"Downloading {file}...")
+                hf_hub_download(
+                    repo_id=self.repo_id,
+                    filename=file,
+                    tqdm_class=functools.partial(_HFProgressTqdm, self.status.emit),
+                )
+                self.status.emit(f"Downloaded {file}")
+            self.finished_ok.emit(True)
+        except Exception as e:
+            self.status.emit(f"Download error: {str(e)}")
+            logger.error(f"Tag model download failed: {e}")
+            self.finished_ok.emit(False)
 
 
 class CaptionGeneratorTab(QWidget):
@@ -178,7 +230,9 @@ class CaptionGeneratorTab(QWidget):
         batch_label = QLabel("Batch size:")
         self.batch_size_input = QSpinBox()
         self.batch_size_input.setMinimum(1)
-        self.batch_size_input.setMaximum(32)
+        # Measured on RTX 3090 (24 GB): batch 56 fits without a gpu_mem_limit
+        # (~16.9 GB used). 48 keeps headroom for the other in-app models.
+        self.batch_size_input.setMaximum(48)
         self.batch_size_input.setValue(1)
         
         worker_label = QLabel("Data loader workers:")
@@ -231,7 +285,16 @@ class CaptionGeneratorTab(QWidget):
         self.setLayout(layout)
         
         # Connect signals
-        self.folder_input.textChanged.connect(self.validate_folder)
+        self.folder_input.textChanged.connect(self._on_folder_text_changed)
+        # The "Valid folder path" status line is logged 500 ms after typing
+        # stops (debounced) instead of on every valid prefix while typing.
+        self._folder_logged_path = None
+        self._folder_log_timer = QTimer(self)
+        self._folder_log_timer.setSingleShot(True)
+        self._folder_log_timer.setInterval(500)
+        self._folder_log_timer.timeout.connect(
+            lambda: self.validate_folder(self.folder_input.text(), log=True)
+        )
         # The captioner itself is built lazily on the first "Generate
         # Captions" click (see start_processing) to keep startup fast.
 
@@ -327,68 +390,68 @@ class CaptionGeneratorTab(QWidget):
 
     def download_model(self):
         """Download the selected model into the shared HuggingFace cache
-        (~/.cache/huggingface/hub) instead of the project's root folder."""
+        (~/.cache/huggingface/hub) - in a worker thread, with progress."""
         try:
             model_name = self.model_dropdown.currentText()
             model_info = ImageCaptioner.MODELS[model_name]
             repo_id = model_info['repo_id']
-            
+
             # Disable UI elements during download
             self.download_btn.setEnabled(False)
             self.model_dropdown.setEnabled(False)
             self.download_btn.setText("Downloading...")
             self.status_text.append(f"Downloading {model_name} from {repo_id}...")
-            
-            # Download files. Omitting local_dir makes hf_hub_download store
-            # the files in the default HuggingFace cache directory
-            # (~/.cache/huggingface/hub) and return each cached file path.
-            files = ["model.onnx", "selected_tags.csv"]
-            for file in files:
-                self.status_text.append(f"Downloading {file}...")
-                try:
-                    downloaded_path = hf_hub_download(
-                        repo_id=repo_id,
-                        filename=file
-                    )
-                    print(f"Downloaded to: {downloaded_path}")  # Debug print
-                    self.status_text.append(f"Downloaded {file}")
-                except Exception as e:
-                    self.status_text.append(f"Error downloading {file}: {str(e)}")
-                    raise
-            
-            # Verify files exist in the cache after download
-            if not self.check_model_exists(model_name):
-                raise Exception(f"Files not found in the HuggingFace cache after download")
-            
-            # Re-enable UI elements
-            self.download_btn.setEnabled(True)
-            self.model_dropdown.setEnabled(True)
-            self.download_btn.setText("Download Model")
-            
-            # Hide download button. The captioner itself is built lazily
-            # on the first "Generate Captions" click
-            self.download_btn.hide()
-            self.captioner = None
-            self.status_text.append(f"Model {model_name} downloaded successfully!")
-            self.validate_folder(self.folder_input.text())
-            
+
+            self.download_thread = TagModelDownloadThread(
+                repo_id, ["model.onnx", "selected_tags.csv"]
+            )
+            self.download_thread.status.connect(self._on_download_status)
+            self.download_thread.finished_ok.connect(self._download_done)
+            self.download_thread.start()
+
         except Exception as e:
-            error_msg = f"Error downloading model: {str(e)}"
+            error_msg = f"Error starting download: {str(e)}"
             self.status_text.append(error_msg)
             logger.error(error_msg)
             self.download_btn.setEnabled(True)
             self.model_dropdown.setEnabled(True)
             self.download_btn.setText("Retry Download")
 
-    def validate_folder(self, path):
-        """Validate the folder path and enable/disable process button"""
-        if os.path.isdir(path):
-            self.process_btn.setEnabled(True)
-            self.folder_input.setStyleSheet("")
-            self.status_text.append(f"Valid folder path: {path}")
+    def _on_download_status(self, text):
+        self.status_text.append(text)
+
+    def _download_done(self, ok):
+        model_name = self.model_dropdown.currentText()
+        self.download_btn.setEnabled(True)
+        self.model_dropdown.setEnabled(True)
+
+        if ok and self.check_model_exists(model_name):
+            self.download_btn.setText("Download Model")
+            # Hide download button. The captioner itself is built lazily
+            # on the first "Generate Captions" click
+            self.download_btn.hide()
+            self.captioner = None
+            self.status_text.append(f"Model {model_name} downloaded successfully!")
+            self.validate_folder(self.folder_input.text())
         else:
-            self.process_btn.setEnabled(False)
-            self.folder_input.setStyleSheet("background-color: #FFE6E6;")  # Light red background for invalid path
+            self.download_btn.setText("Retry Download")
+            self.status_text.append(f"Model {model_name} download failed")
+
+    def _on_folder_text_changed(self, text):
+        # State (button/style) updates immediately; the status line is
+        # debounced so typing a long path doesn't flood the box with one
+        # line per valid directory prefix.
+        self.validate_folder(text, log=False)
+        self._folder_log_timer.start()
+
+    def validate_folder(self, path, log=True):
+        """Validate the folder path and enable/disable process button."""
+        valid = os.path.isdir(path)
+        if log and valid and self._folder_logged_path != path:
+            self.status_text.append(f"Valid folder path: {path}")
+            self._folder_logged_path = path
+        self.process_btn.setEnabled(valid)
+        self.folder_input.setStyleSheet("" if valid else "background-color: #FFE6E6;")
 
     def initialize_captioner(self):
         try:

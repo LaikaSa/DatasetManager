@@ -79,8 +79,8 @@ if not exist "%SCRIPT_DIR%\start.bat" (
     echo Creating launch script...
     (
     echo @echo off
-    echo cd "%SCRIPT_DIR%"
-    echo "%VENV_PYTHON%" run.py
+    echo cd /d "%%~dp0"
+    echo ".venv\Scripts\python.exe" run.py
     echo pause
     ) > "%SCRIPT_DIR%\start.bat"
 )

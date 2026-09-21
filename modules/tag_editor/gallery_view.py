@@ -73,6 +73,7 @@ class FullImageView(QWidget):
     def __init__(self):
         super().__init__()
         self.current_image = None
+        self._full_pixmap = None  # decoded once; resize only re-scales it
         layout = QVBoxLayout(self)
         
         # Close button
@@ -102,15 +103,19 @@ class FullImageView(QWidget):
 
     def load_image(self, path: str):
         self.current_image = path
-        pixmap = QPixmap(path)
-        scaled = pixmap.scaled(
-            self.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        self.image_label.setPixmap(scaled)
+        self._full_pixmap = QPixmap(path)  # decode once per image
+        self._rescale()
         self.image_label.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.image_label.customContextMenuRequested.connect(self.show_context_menu)
+
+    def _rescale(self):
+        if self._full_pixmap is not None and not self._full_pixmap.isNull():
+            scaled = self._full_pixmap.scaled(
+                self.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation
+            )
+            self.image_label.setPixmap(scaled)
 
     def show_context_menu(self, pos):
         if not self.current_image:
@@ -124,11 +129,13 @@ class FullImageView(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        if self.current_image:
-            self.load_image(self.current_image)
+        # Re-scale the cached pixmap instead of re-decoding the full file
+        # on every resize event.
+        self._rescale()
 
     def clear(self):
         self.current_image = None
+        self._full_pixmap = None
         self.image_label.clear()
 
 class GalleryView(QWidget):
@@ -137,6 +144,7 @@ class GalleryView(QWidget):
     def __init__(self):
         super().__init__()
         self.current_thumbnails = []  # Add this to track current visible images
+        self._last_columns = 0  # only re-tile when the column count changes
         self.init_ui()
 
     def init_ui(self):
@@ -174,20 +182,23 @@ class GalleryView(QWidget):
         self.stack.setCurrentWidget(self.scroll)
         self.image_selected.emit("")  # Emit empty path when returning to grid
 
+    def _column_count(self):
+        width = self.scroll.viewport().width()
+        thumb_width = 155  # 150px thumb + 5px spacing
+        return max(1, min(5, width // thumb_width))
+
     def display_images(self, images: list[ImageData]):
         # Store current visible images
         self.current_thumbnails = images
+
+        columns = self._column_count()
+        self._last_columns = columns
 
         # Clear current grid
         while self.grid.count():
             item = self.grid.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-
-        # Calculate columns: min 1, max 5, based on viewport width
-        width = self.scroll.viewport().width()
-        thumb_width = 155  # 150px thumb + 5px spacing
-        columns = max(1, min(5, width // thumb_width))
 
         # Add thumbnails to grid
         for idx, image_data in enumerate(images):
@@ -197,8 +208,10 @@ class GalleryView(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        # Re-tile whenever the gallery panel is resized by the splitter
-        if self.current_thumbnails:
+        # Re-tile only when the column count actually changes - dragging the
+        # splitter fired this on every frame and rebuilt every thumbnail
+        # widget while the count stayed the same.
+        if self.current_thumbnails and self._column_count() != self._last_columns:
             self.display_images(self.current_thumbnails)
 
     def get_visible_images(self) -> list:

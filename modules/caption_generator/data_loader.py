@@ -2,6 +2,9 @@ import torch
 import numpy as np
 from PIL import Image
 import cv2
+from modules.logger import setup_logger
+
+logger = setup_logger()
 
 class ImageLoadingPrepDataset(torch.utils.data.Dataset):
     def __init__(self, image_paths):

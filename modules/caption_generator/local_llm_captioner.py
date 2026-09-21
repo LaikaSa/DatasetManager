@@ -118,12 +118,24 @@ class LocalLLMCaptioner:
     def endpoint(self):
         return f"{self.base_url}/v1/chat/completions"
 
+    # Vision models downscale inputs internally, so sending full-resolution
+    # images mostly inflates the base64 payload and slows every request.
+    # Capping the longest edge keeps quality while shrinking it a lot.
+    MAX_ENCODE_EDGE = 1024
+
     def _encode_image(self, image_path):
         """Re-encode any supported image as JPEG for broad compatibility
         with vision-capable local models, returned as a base64 data URL."""
         with Image.open(image_path) as img:
             if img.mode != 'RGB':
                 img = img.convert('RGB')
+            longest = max(img.size)
+            if longest > self.MAX_ENCODE_EDGE:
+                scale = self.MAX_ENCODE_EDGE / longest
+                img = img.resize(
+                    (max(1, int(img.width * scale)), max(1, int(img.height * scale))),
+                    Image.Resampling.LANCZOS,
+                )
             buffer = io.BytesIO()
             img.save(buffer, format='JPEG', quality=95)
             encoded = base64.b64encode(buffer.getvalue()).decode('utf-8')

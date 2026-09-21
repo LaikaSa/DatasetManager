@@ -55,6 +55,9 @@ class ParallelLoader:
 
     def start_pool(self):
         if self.pool is None:
+            # One Pool per ParallelLoader instance. Each LoadingThread owns
+            # its loader and calls stop_pool() when it finishes, so workers
+            # always exit from the thread that created the pool.
             self.pool = Pool(processes=cpu_count())
 
     def stop_pool(self):
@@ -62,6 +65,21 @@ class ParallelLoader:
             self.pool.close()
             self.pool.join()
             self.pool = None
+
+    @staticmethod
+    def array_to_pixmap(arr):
+        """Build a QPixmap from an RGB numpy array on the GUI thread.
+
+        (QPixmap is a GUI object - building it on a QThread/process worker
+        isn't guaranteed. The .copy() makes the QImage own its data, since
+        the numpy array is only alive inside the worker.)
+        """
+        from PySide6.QtGui import QImage, QPixmap
+        height, width, channel = arr.shape
+        q_img = QImage(
+            arr.data, width, height, 3 * width, QImage.Format_RGB888
+        ).copy()
+        return QPixmap.fromImage(q_img)
 
     def load_images(self, directory):
         """Load images and tags in parallel"""
@@ -82,10 +100,12 @@ class ParallelLoader:
             
             # Prepare arguments
             args = [(path, self.thumbnail_size) for path in image_paths]
-            
-            # Process images in parallel
+
+            # Process images in parallel (chunksize keeps worker<->main IPC
+            # sane on large folders instead of one task per message)
             parallel_start = time.time()
-            results = self.pool.map(process_single_image, args)
+            chunksize = max(1, len(args) // (self.pool._processes * 4))
+            results = self.pool.map(process_single_image, args, chunksize=chunksize)
             parallel_end = time.time()
             print(f"Parallel processing time: {parallel_end - parallel_start:.2f} seconds")
             
@@ -99,43 +119,25 @@ class ParallelLoader:
                 if result is None:
                     failed += 1
                     continue
-                    
-                try:
-                    # Convert numpy array to QImage
-                    height, width, channel = result['array'].shape
-                    bytes_per_line = 3 * width
-                    
-                    q_img = QImage(
-                        result['array'].data,
-                        width,
-                        height,
-                        bytes_per_line,
-                        QImage.Format_RGB888
-                    )
-                    
-                    # Convert to QPixmap
-                    thumbnail = QPixmap.fromImage(q_img)
-                    
-                    processed_images.append({
-                        'path': result['path'],
-                        'thumbnail': thumbnail,
-                        'tags': result['tags']
-                    })
-                    successful += 1
-                except Exception as e:
-                    print(f"Error converting image {result['path']}: {e}")
-                    failed += 1
-            
+
+                # NOTE: no QPixmap is created here. This method runs inside a
+                # QThread, so GUI objects are built on the main thread by the
+                # caller (ParallelLoader.array_to_pixmap).
+                processed_images.append({
+                    'path': result['path'],
+                    'array': result['array'],
+                    'tags': result['tags']
+                })
+                successful += 1
+
             conversion_end = time.time()
-            print(f"\nConversion Summary:")
+            print(f"\nParallel Summary:")
             print(f"Successful conversions: {successful}")
             print(f"Failed conversions: {failed}")
-            print(f"Conversion time: {conversion_end - conversion_start:.2f} seconds")
-            
+            print(f"Parallel time: {conversion_end - conversion_start:.2f} seconds")
+
             return processed_images
-                
+
         except Exception as e:
             print(f"Error in parallel loading: {e}")
             return []
-        finally:
-            self.stop_pool()

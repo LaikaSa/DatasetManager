@@ -5,6 +5,9 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QLineEdit, QCheckBox,
 from PySide6.QtCore import Signal, Qt
 from collections import Counter
 import os
+from modules.logger import setup_logger
+
+logger = setup_logger()
 
 class TagList(QScrollArea):
     tag_toggled = Signal(str, bool)
@@ -182,7 +185,7 @@ class FilterTab(QWidget):
         self.emit_filter_change()
 
     def on_tag_toggled(self, tag: str, checked: bool):
-        print(f"FilterTab received tag toggle: {tag}, {checked}")
+        logger.debug("FilterTab tag toggle: %s -> %s", tag, checked)
         if checked:
             self.selected_tags.add(tag)
         else:
@@ -192,10 +195,8 @@ class FilterTab(QWidget):
     def emit_filter_change(self):
         combine_logic = "AND" if self.and_logic.isChecked() else "OR"
         filter_logic = "POSITIVE" if self.positive_logic.isChecked() else "NEGATIVE"
-        print(f"Emitting filter: {len(self.selected_tags)} tags")
-        print(f"Selected tags: {self.selected_tags}")
-        print(f"Combine logic: {combine_logic}")
-        print(f"Filter logic: {filter_logic}")
+        logger.debug("Emitting filter: %d tags (%s, %s)",
+                     len(self.selected_tags), combine_logic, filter_logic)
         self.filter_changed.emit(self.selected_tags, combine_logic, filter_logic)
 
     def filter_tag_list(self, text):
@@ -466,7 +467,7 @@ class TagPanel(QWidget):
         )
 
     def on_filter_changed(self, tags: set, combine_logic: str, filter_logic: str):
-        print(f"TagPanel forwarding filter: {len(tags)} tags")
+        logger.debug("TagPanel forwarding filter: %d tags", len(tags))
         self.filter_changed.emit(tags, combine_logic, filter_logic)
 
     def update_tags(self, tag_counts: Counter):

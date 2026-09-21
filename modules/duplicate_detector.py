@@ -8,49 +8,96 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
                               QFileDialog, QMessageBox, QProgressBar, QCheckBox,
                               QSlider, QHBoxLayout, QGroupBox, QScrollArea, QLineEdit,
                               QApplication)
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QThreadPool, QRunnable, QObject
 from PySide6.QtGui import QPixmap, QImage
 from send2trash import send2trash
-from functools import lru_cache
 from modules.logger import setup_logger
 
 logger = setup_logger()
+# QPixmap cache: path -> pixmap. QPixmap is a GUI object, so it is only ever
+# created on the main thread (the bridge signal is delivered there).
 thumbnail_cache = {}
 
-@lru_cache(maxsize=1000)  # Cache up to 1000 thumbnails
-def create_cached_thumbnail(image_path):
-    if image_path in thumbnail_cache:
-        return thumbnail_cache[image_path]
-    
+
+def create_thumbnail_bytes(image_path, max_size=200):
+    """Decode + resize to JPEG bytes (thread-safe: no Qt objects involved)."""
     try:
         with Image.open(image_path) as img:
             if img.mode in ('RGBA', 'P'):
                 img = img.convert('RGB')
-            
+
             width, height = img.size
-            ratio = min(200/width, 200/height)
-            new_width = int(width * ratio)
-            new_height = int(height * ratio)
-            
+            ratio = min(max_size / width, max_size / height)
+            new_width = max(1, int(width * ratio))
+            new_height = max(1, int(height * ratio))
+
             img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            
+
             buffer = io.BytesIO()
             img_resized.save(buffer, format='JPEG')
-            qt_img = QImage.fromData(buffer.getvalue())
-            pixmap = QPixmap.fromImage(qt_img)
-            
-            thumbnail_cache[image_path] = pixmap
-            return pixmap
+            return buffer.getvalue()
     except Exception as e:
         logger.error(f"Error creating thumbnail for {image_path}: {str(e)}")
         return None
 
+
+class _ThumbnailBridge(QObject):
+    """Delivers decoded thumbnail bytes from worker threads to the GUI thread."""
+    ready = Signal(str, bytes)
+
+
+_thumbnail_bridge = _ThumbnailBridge()
+_thumbnail_pool = QThreadPool()
+_thumbnail_pool.setMaxThreadCount(max(2, min(8, os.cpu_count() or 4)))
+
+
+class _ThumbnailJob(QRunnable):
+    def __init__(self, image_path):
+        super().__init__()
+        self.image_path = image_path
+
+    def run(self):
+        data = create_thumbnail_bytes(self.image_path)
+        if data is not None:
+            _thumbnail_bridge.ready.emit(self.image_path, data)
+
+
+def _on_thumbnail_ready(image_path, data):
+    if image_path in thumbnail_cache:
+        return
+    qimg = QImage.fromData(data)
+    if qimg.isNull():
+        return
+    thumbnail_cache[image_path] = QPixmap.fromImage(qimg)
+
+
+_thumbnail_bridge.ready.connect(_on_thumbnail_ready)
+
+
+def request_thumbnail(image_path):
+    """Ensure a thumbnail for path exists (cached, main thread)."""
+    if image_path in thumbnail_cache:
+        return thumbnail_cache[image_path]
+    _thumbnail_pool.start(_ThumbnailJob(image_path))
+    return None
+
+
+def clear_thumbnail_cache(image_paths=None):
+    """Drop cached pixmaps (all of them, or just the given paths)."""
+    if image_paths is None:
+        thumbnail_cache.clear()
+    else:
+        for p in image_paths:
+            thumbnail_cache.pop(p, None)
+
 class ImagePreviewGroup(QWidget):
-    def __init__(self, images, similarity, method, selected_images, selection_callback):
+    def __init__(self, images, similarity, method, selected_images, selection_callback,
+                 sizes=None):
         super().__init__()
         self.selected_images = selected_images
         self.selection_callback = selection_callback
         self.images = images
+        self.sizes = sizes or {}  # path -> (width, height), from the detection worker
         self.containers = []
         self.init_ui(similarity, method)
 
@@ -79,7 +126,8 @@ class ImagePreviewGroup(QWidget):
                 img_container = ClickableImageContainer(
                     img_path,
                     img_path in self.selected_images,
-                    self.on_image_clicked
+                    self.on_image_clicked,
+                    size=self.sizes.get(img_path)
                 )
                 image_layout.addWidget(img_container)
                 self.containers.append(img_container)
@@ -97,38 +145,16 @@ class ImagePreviewGroup(QWidget):
     def on_image_clicked(self, img_path, is_selected):
         self.selection_callback(img_path, is_selected)
 
-    def create_thumbnail(self, image_path):
-        # Create a thumbnail with max size 200x200 while maintaining aspect ratio
-        with Image.open(image_path) as img:
-            # Convert to RGB if necessary
-            if img.mode in ('RGBA', 'P'):
-                img = img.convert('RGB')
-            
-            # Calculate new dimensions
-            width, height = img.size
-            ratio = min(200/width, 200/height)
-            new_width = int(width * ratio)
-            new_height = int(height * ratio)
-            
-            # Resize image
-            img_resized = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-            
-            # Convert to QPixmap
-            buffer = io.BytesIO()
-            img_resized.save(buffer, format='JPEG')
-            qt_img = QImage.fromData(buffer.getvalue())
-            return QPixmap.fromImage(qt_img)
-        
 class ClickableImageContainer(QWidget):
-    def __init__(self, img_path, is_selected, callback):
+    def __init__(self, img_path, is_selected, callback, size=None):
         super().__init__()
         self.img_path = img_path
         self.is_selected = is_selected
         self.callback = callback
         self.thumbnail_loaded = False
-        self.init_ui()
+        self.init_ui(size)
 
-    def init_ui(self):
+    def init_ui(self, size):
         layout = QVBoxLayout()
         layout.setContentsMargins(5, 5, 5, 5)
 
@@ -137,11 +163,21 @@ class ClickableImageContainer(QWidget):
         self.img_label.setAlignment(Qt.AlignCenter)
         self.img_label.setMinimumSize(200, 200)
 
-        # Resolution label with file type
-        with Image.open(self.img_path) as img:
-            width, height = img.size
+        # Resolution label with file type. The detection worker already read
+        # every image once, so prefer the size it reports - this avoids an
+        # extra decode on the main thread per container.
+        if size is None:
+            try:
+                with Image.open(self.img_path) as img:
+                    size = img.size
+            except Exception:
+                size = None
         ext = os.path.splitext(self.img_path)[1].lower()
-        self.resolution_label = QLabel(f"{width} × {height} ({ext})")
+        if size is not None:
+            res_text = f"{size[0]} × {size[1]} ({ext})"
+        else:
+            res_text = f"({ext})"
+        self.resolution_label = QLabel(res_text)
         self.resolution_label.setAlignment(Qt.AlignCenter)
 
         layout.addWidget(self.img_label)
@@ -152,19 +188,32 @@ class ClickableImageContainer(QWidget):
         # Set initial style based on selection state
         self.update_style()
 
-        # Start loading thumbnail in background
-        QThread.currentThread().priority()  # Ensure we're in the main thread
+        # Start loading thumbnail in background (worker threads, not this one)
+        _thumbnail_bridge.ready.connect(self._on_thumbnail_ready)
         self.load_thumbnail_later()
+
+    def _on_thumbnail_ready(self, image_path, _data):
+        if image_path != self.img_path:
+            return
+        self.load_thumbnail()
+
+    def closeEvent(self, event):
+        try:
+            _thumbnail_bridge.ready.disconnect(self._on_thumbnail_ready)
+        except (TypeError, RuntimeError):
+            pass
+        super().closeEvent(event)
 
     def load_thumbnail_later(self):
         QTimer.singleShot(10, self.load_thumbnail)
 
     def load_thumbnail(self):
-        if not self.thumbnail_loaded:
-            pixmap = create_cached_thumbnail(self.img_path)
-            if pixmap:
-                self.img_label.setPixmap(pixmap)
-                self.thumbnail_loaded = True
+        if self.thumbnail_loaded:
+            return
+        pixmap = request_thumbnail(self.img_path)
+        if pixmap:
+            self.img_label.setPixmap(pixmap)
+            self.thumbnail_loaded = True
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -242,7 +291,9 @@ class WorkerThread(QThread):
         
         # Store all images with their features
         image_features = {}
-        
+        sizes = {}  # path -> (width, height), collected here so the preview UI
+        # doesn't have to re-decode every image on the main thread
+
         # First pass: calculate features for all images
         logger.info("First pass: Calculating features")
         for idx, img_path in enumerate(image_files):
@@ -254,14 +305,18 @@ class WorkerThread(QThread):
                 if self.use_hash:
                     with Image.open(img_path) as img:
                         features['hash'] = imagehash.average_hash(img)
-                
+                        sizes[img_path] = img.size
+
                 if self.use_hist:
                     img_cv = cv2.imread(img_path)
                     if img_cv is not None:
                         hist = cv2.calcHist([img_cv], [0, 1, 2], None, [8, 8, 8],
                                         [0, 256, 0, 256, 0, 256])
                         features['hist'] = cv2.normalize(hist, hist).flatten()
-                
+                        if img_path not in sizes:
+                            h, w = img_cv.shape[:2]
+                            sizes[img_path] = (w, h)
+
                 image_features[img_path] = features
                 print_progress_bar(idx + 1, total_files, prefix='Processing:')
 
@@ -269,56 +324,107 @@ class WorkerThread(QThread):
                 logger.error(f"Error processing {img_path}: {str(e)}", exc_info=True)
 
         print()  # New line after first pass
-        
-        # Second pass: group similar images
+
+        # Second pass: group similar images (vectorized - one matmul instead of
+        # an O(n^2) Python loop of cv2.compareHist / hash subtractions)
         logger.info("Second pass: Comparing images")
         groups = []
-        processed = set()
-        processed_count = 0
+        paths = list(image_features.keys())
+        n = len(paths)
 
-        for img_path, features in image_features.items():
-            if img_path in processed:
-                continue
+        if n > 1 and self.is_running:
+            hash_sim = None
+            hash_valid = None
+            corr = None
+            hist_valid = None
 
-            similar_images = {img_path}
-            method = None
-            max_similarity = 0
+            if self.use_hash:
+                bits = np.full((n, 64), -1, dtype=np.int32)
+                for i, p in enumerate(paths):
+                    h = image_features[p].get('hash')
+                    if h is not None:
+                        # imagehash stores the 64-bit hash (here: 8x8 bool array)
+                        hv = np.asarray(h.hash)
+                        if hv.dtype == bool or hv.ndim > 1:
+                            bits[i] = hv.ravel()[:64].astype(np.int32)
+                        else:
+                            v = int(hv.ravel()[0])
+                            bits[i] = np.array([(v >> (63 - k)) & 1 for k in range(64)],
+                                               dtype=np.int32)
+                hash_valid = bits[:, 0] >= 0
+                b = np.where(hash_valid[:, None], bits, 0)
+                pop = b.sum(axis=1)
+                hamming = pop[:, None] + pop[None, :] - 2 * (b @ b.T)
+                hash_sim = 1.0 - hamming / 64.0
 
-            # Find all similar images
-            for other_path, other_features in image_features.items():
-                if other_path == img_path or other_path in processed:
+            if self.use_hist:
+                d = 512  # 8x8x8 histogram
+                H = np.zeros((n, d), dtype=np.float64)
+                for i, p in enumerate(paths):
+                    hv = image_features[p].get('hist')
+                    if hv is not None:
+                        H[i] = np.asarray(hv, dtype=np.float64).ravel()[:d]
+                hist_valid = np.array([image_features[p].get('hist') is not None for p in paths])
+                Hv = np.where(hist_valid[:, None], H, 0.0)
+                # Pearson correlation in one matmul (matches cv2.HISTCMP_CORREL)
+                C = Hv - Hv.mean(axis=1, keepdims=True)
+                norms = np.sqrt((C * C).sum(axis=1))
+                M = C @ C.T
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    corr = M / np.outer(norms, norms)
+                bad = (norms[:, None] == 0) | (norms[None, :] == 0)
+                corr = np.where(bad, -2.0, corr)
+
+            all_idx = np.arange(n)
+            processed = set()
+            processed_mask = np.zeros(n, dtype=bool)
+            processed_count = 0
+
+            for i, img_path in enumerate(paths):
+                if i in processed:
                     continue
 
-                if self.use_hash and 'hash' in features and 'hash' in other_features:
-                    hash_diff = features['hash'] - other_features['hash']
-                    # Average hash is typically 64 bits, so normalize by that
-                    similarity = 1 - (hash_diff / 64.0)
-                    if similarity >= self.hash_threshold:
-                        similar_images.add(other_path)
-                        if similarity > max_similarity:
-                            max_similarity = similarity
-                            method = 'Hash'
+                qualifies = np.zeros(n, dtype=bool)
+                val_h = np.full(n, -np.inf)
+                val_s = np.full(n, -np.inf)
 
-                if self.use_hist and 'hist' in features and 'hist' in other_features:
-                    hist_corr = cv2.compareHist(features['hist'], other_features['hist'], 
-                                            cv2.HISTCMP_CORREL)
-                    if hist_corr >= self.hist_threshold:
-                        similar_images.add(other_path)
-                        if hist_corr > max_similarity:
-                            max_similarity = hist_corr
-                            method = 'Histogram'
+                if hash_sim is not None and hash_valid[i]:
+                    mask = hash_valid & (hash_sim[i] >= self.hash_threshold)
+                    qualifies |= mask & ~processed_mask & (all_idx != i)
+                    val_h = np.where(mask & ~processed_mask & (all_idx != i), hash_sim[i], -np.inf)
 
-            # If we found similar images, create a group
-            if len(similar_images) > 1:
-                groups.append({
-                    'images': list(similar_images),
-                    'similarity': max_similarity,
-                    'method': method
-                })
-                processed.update(similar_images)
+                if corr is not None and hist_valid[i]:
+                    mask = hist_valid & (corr[i] >= self.hist_threshold)
+                    qualifies |= mask & ~processed_mask & (all_idx != i)
+                    val_s = np.where(mask & ~processed_mask & (all_idx != i), corr[i], -np.inf)
 
-            processed_count += 1
-            print_progress_bar(processed_count, total_files, prefix='Comparing:')
+                qualifies &= ~processed_mask
+                qualifies[i] = False
+
+                if qualifies.any():
+                    # Per-pair value: hash is checked first in the original
+                    # algorithm and wins ties, so 'Histogram' only if it is
+                    # strictly larger.
+                    pair_val = np.maximum(val_h, val_s)
+                    j_star = int(np.argmax(np.where(qualifies, pair_val, -np.inf)))
+                    similarity = float(pair_val[j_star])
+                    method = 'Histogram' if val_s[j_star] > val_h[j_star] else 'Hash'
+
+                    group_idx = [i] + [int(j) for j in np.flatnonzero(qualifies)]
+                    groups.append({
+                        'images': [paths[j] for j in group_idx],
+                        'similarity': similarity,
+                        'method': method,
+                        'sizes': {paths[j]: sizes.get(paths[j]) for j in group_idx}
+                    })
+                    processed.update(group_idx)
+                    processed_mask[group_idx] = True
+
+                processed_count += 1
+                if processed_count % 50 == 0:
+                    print_progress_bar(processed_count, total_files, prefix='Comparing:')
+                if not self.is_running:
+                    break
 
         print()  # New line after second pass
 
@@ -580,14 +686,15 @@ class DuplicateDetectorTab(QWidget):
     def display_current_group(self):
         if not self.image_groups:
             return
-            
+
         group = self.image_groups[self.current_group_index]
         preview_widget = ImagePreviewGroup(
             images=group['images'],
             similarity=group['similarity'],
             method=group['method'],
             selected_images=self.selected_images,
-            selection_callback=self.on_selection_changed
+            selection_callback=self.on_selection_changed,
+            sizes=group.get('sizes')
         )
         self.preview_area.setWidget(preview_widget)
         self.update_navigation_buttons()
@@ -622,24 +729,28 @@ class DuplicateDetectorTab(QWidget):
         )
 
         if reply == QMessageBox.Yes:
-            from send2trash import send2trash
             failed_files = []
-            
+
             for img_path in list(self.selected_images):  # Create a copy of the list
                 try:
                     # Normalize path to handle Windows paths correctly
                     normalized_path = os.path.normpath(img_path)
                     send2trash(normalized_path)
                     self.selected_images.remove(img_path)
-                    
+
                     # Remove the image from groups
                     for group in self.image_groups[:]:
                         group['images'] = [img for img in group['images'] if img != img_path]
+                        if 'sizes' in group:
+                            group['sizes'].pop(img_path, None)
                         if len(group['images']) < 2:
                             self.image_groups.remove(group)
-                
+
                 except Exception as e:
                     failed_files.append((img_path, str(e)))
+
+            # Free the cached thumbnails of the trashed files
+            clear_thumbnail_cache(list(self.selected_images))
 
             # Show results
             if failed_files:
@@ -716,6 +827,7 @@ class DuplicateDetectorTab(QWidget):
         self.image_groups = []
         self.current_group_index = 0
         self.preview_area.setWidget(QWidget())  # Clear preview area
+        clear_thumbnail_cache()  # fresh scan, fresh cache
         
         self.worker = WorkerThread(
             self.folder_path,

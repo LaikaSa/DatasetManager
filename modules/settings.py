@@ -35,12 +35,22 @@ def _settings():
 # Device selection
 # ---------------------------------------------------------------------------
 
-def list_devices():
+_device_cache = None
+
+
+def list_devices(refresh=False):
     """Ordered list of {'id': int, 'label': str} devices.
 
     CPU first, then one entry per CUDA GPU (with its name when known).
     Never raises: on a machine without torch/CUDA it simply returns [CPU].
+
+    The first call imports torch and queries CUDA, so the result is cached
+    for the process lifetime (hardware doesn't change while the app runs);
+    pass refresh=True to force a re-query.
     """
+    global _device_cache
+    if _device_cache is not None and not refresh:
+        return _device_cache
     devices = [{"id": CPU_ID, "label": "CPU"}]
     try:
         import torch
@@ -53,6 +63,7 @@ def list_devices():
                 devices.append({"id": i, "label": f"GPU {i}: {name}"})
     except Exception:
         pass
+    _device_cache = devices
     return devices
 
 

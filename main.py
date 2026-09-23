@@ -1,4 +1,6 @@
+import importlib
 import sys
+import threading
 from PySide6.QtWidgets import (QApplication, QMainWindow, QTabWidget, QMenu,
                               QToolButton, QWidget)
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QDragMoveEvent, QAction
@@ -8,9 +10,21 @@ from modules import settings as app_settings
 # NOTE: the tab modules are intentionally NOT imported here. They pull in
 # heavy dependencies (torch ~2 s, pandas, onnxruntime, cv2, ...) which used to
 # delay the GUI appearing at startup. Each tab is built lazily on first visit
-# (see _build_tab / _ensure_tab_built).
+# (see _build_tab / _ensure_tab_built), and its module is pre-warmed on a
+# background thread after startup (see _start_prewarm) so the first click
+# doesn't freeze the UI while Python imports the dependencies.
 import os  # Add this for path operations
 logger = setup_logger()
+
+# tab key -> module path, shared by _build_tab and the pre-warm worker
+TAB_MODULE_PATHS = {
+    "duplicate": "modules.duplicate_detector",
+    "resizer": "modules.image_resizer",
+    "upscaler": "modules.Upscaler.upscaler",
+    "caption": "modules.caption_generator",
+    "tag_editor": "modules.tag_editor",
+    "conversion": "modules.Conversion_Tools",
+}
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -49,6 +63,10 @@ class MainWindow(QMainWindow):
         # Settings cog (top-right): choose the compute device for models
         self._build_settings_button()
 
+        # Import the heavy tab modules in the background now, so clicking a
+        # tab later doesn't freeze the UI on its first visit.
+        self._start_prewarm()
+
     def _build_settings_button(self):
         """Create the settings cog in the menu-bar corner with a device picker."""
         self.menuBar().setNativeMenuBar(False)
@@ -85,26 +103,47 @@ class MainWindow(QMainWindow):
         self._rebuild_device_menu()
 
     def _build_tab(self, key):
-        """Import and construct the tab widget for a key (deferred imports)."""
+        """Import and construct the tab widget for a key (deferred imports).
+
+        The module is normally already imported by the pre-warm thread; if the
+        user clicks before it gets there, the import lock makes this call wait
+        briefly and reuse the in-progress import.
+        """
+        module = importlib.import_module(TAB_MODULE_PATHS[key])
         if key == "duplicate":
-            from modules.duplicate_detector import DuplicateDetectorTab
-            return DuplicateDetectorTab()
+            return module.DuplicateDetectorTab()
         if key == "resizer":
-            from modules.image_resizer import ImageResizerTab
-            return ImageResizerTab()
+            return module.ImageResizerTab()
         if key == "upscaler":
-            from modules.Upscaler.upscaler import UpscalerTab
-            return UpscalerTab()
+            return module.UpscalerTab()
         if key == "caption":
-            from modules.caption_generator import CaptionGeneratorTab
-            return CaptionGeneratorTab()
+            return module.CaptionGeneratorTab()
         if key == "tag_editor":
-            from modules.tag_editor import TagEditorTab
-            return TagEditorTab()
+            return module.TagEditorTab()
         if key == "conversion":
-            from modules.Conversion_Tools import ConversionTab
-            return ConversionTab()
+            return module.ConversionTab()
         raise KeyError(f"Unknown tab key: {key}")
+
+    def _start_prewarm(self):
+        """Import all tab modules on a daemon thread so first-visit clicks are fast.
+
+        Only the imports run off the main thread (never widget construction,
+        which must happen in the GUI thread). If the user opens a tab before
+        its import finishes, the import lock makes _build_tab block until the
+        background import completes and then reuse it - no double import.
+        """
+        def worker():
+            for key, path in TAB_MODULE_PATHS.items():
+                if key in self._built_keys:
+                    continue  # already imported by building that tab
+                try:
+                    importlib.import_module(path)
+                except Exception as e:  # keep pre-warming the rest
+                    logger.warning("Pre-warm import of %s failed: %s", path, e)
+            logger.info("Tab module pre-warm complete")
+
+        t = threading.Thread(target=worker, name="tab-prewarm", daemon=True)
+        t.start()
 
     def _add_tabs_in_saved_order(self):
         """Add tabs using the order saved from a previous session, if any.

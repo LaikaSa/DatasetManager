@@ -1,4 +1,5 @@
 import os
+import math
 import torch
 import torch.nn as nn
 import numpy as np
@@ -139,11 +140,12 @@ class UpscaleWorker(QThread):
     model_loaded = Signal(object)  # lets the tab cache the model between runs
 
     def __init__(self, input_paths, model_path, scale_factor, device=None,
-                 model=None, owns_model=True):
+                 model=None, owns_model=True, min_size=0):
         super().__init__()
         self.input_paths = input_paths if isinstance(input_paths, list) else [input_paths]
         self.model_path = model_path
         self.scale_factor = scale_factor
+        self.min_size = int(min_size)  # >0 -> auto per-image scale factor
         self.is_running = True
         if device:
             self.device = device
@@ -153,6 +155,20 @@ class UpscaleWorker(QThread):
         self.owns_model = owns_model  # False when the tab keeps the model
         self.tile_size = 512
         self.tile_pad = 32
+
+    def _effective_scale(self, w, h):
+        """Scale factor for one image.
+
+        In auto mode (min_size > 0) this is the *smallest 0.1 step*
+        (1.0, 1.1, 1.2, ...) that brings the longest side to at least
+        min_size. The factor is applied strictly to both sides (no pixel
+        alignment rounding), so the aspect ratio is kept exactly. Otherwise
+        the user's fixed factor is used.
+        """
+        if self.min_size > 0:
+            steps = math.ceil(self.min_size * 10 / max(w, h) - 1e-9)
+            return max(1.0, steps / 10.0)
+        return self.scale_factor
 
     def print_progress_bar(self, current, total, prefix='Progress:', length=50):
         filled_length = int(length * current / total)
@@ -217,9 +233,13 @@ class UpscaleWorker(QThread):
         try:
             img = Image.open(img_path).convert('RGB')
 
-            # Calculate output size aligned to 8 pixels
-            dest_w = max(8, int((img.width * self.scale_factor) // 8 * 8))
-            dest_h = max(8, int((img.height * self.scale_factor) // 8 * 8))
+            # Per-image scale factor (auto mode targets the minimum size)
+            scale = self._effective_scale(img.width, img.height)
+
+            # Apply the factor strictly to both sides (nearest pixel) so the
+            # aspect ratio is preserved with no alignment rounding.
+            dest_w = max(8, int(round(img.width * scale)))
+            dest_h = max(8, int(round(img.height * scale)))
 
             # Calculate tile dimensions
             tile_w = min(self.tile_size, img.width)
@@ -227,7 +247,7 @@ class UpscaleWorker(QThread):
 
             # If image is small enough, process it directly
             if img.width <= self.tile_size and img.height <= self.tile_size:
-                output_img = self.process_tile(img, self.scale_factor)
+                output_img = self.process_tile(img, scale)
                 if output_img.size != (dest_w, dest_h):
                     output_img = output_img.resize((dest_w, dest_h), Image.Resampling.LANCZOS)
             else:
@@ -242,8 +262,8 @@ class UpscaleWorker(QThread):
                 total_tiles = ((img.height - 1) // step_h + 1) * ((img.width - 1) // step_w + 1)
                 current_tile = 0
 
-                pad_w_out = int(self.tile_pad * self.scale_factor)
-                pad_h_out = int(self.tile_pad * self.scale_factor)
+                pad_w_out = int(self.tile_pad * scale)
+                pad_h_out = int(self.tile_pad * scale)
 
                 # Print initial tile progress bar
                 print('')  # Empty line for progress bar
@@ -257,14 +277,14 @@ class UpscaleWorker(QThread):
                         right = min(x + tile_w, img.width)
                         bottom = min(y + tile_h, img.height)
                         tile = img.crop((x, y, right, bottom))
-                        processed_tile = self.process_tile(tile, self.scale_factor)
+                        processed_tile = self.process_tile(tile, scale)
 
                         # Target region in output space, at its exact size so
                         # non-integer scale factors can't leave 1px gaps.
-                        tx = int(round(x * self.scale_factor))
-                        ty = int(round(y * self.scale_factor))
-                        tw = min(int(round((right - x) * self.scale_factor)), dest_w - tx)
-                        th = min(int(round((bottom - y) * self.scale_factor)), dest_h - ty)
+                        tx = int(round(x * scale))
+                        ty = int(round(y * scale))
+                        tw = min(int(round((right - x) * scale)), dest_w - tx)
+                        th = min(int(round((bottom - y) * scale)), dest_h - ty)
                         if processed_tile.size != (tw, th):
                             processed_tile = processed_tile.resize((tw, th), Image.Resampling.LANCZOS)
 
@@ -656,7 +676,7 @@ class UpscalerTab(QWidget):
         self.resolution_check = QCheckBox("Only upscale images smaller than:")
         self.resolution_spin = QSpinBox()
         self.resolution_spin.setRange(1, 10000)
-        self.resolution_spin.setValue(1024)
+        self.resolution_spin.setValue(1536)
         self.resolution_spin.setSuffix(' px')
         self.resolution_spin.setEnabled(False)
         self.resolution_check.stateChanged.connect(self.toggle_resolution_filter)
@@ -711,7 +731,7 @@ class UpscalerTab(QWidget):
 
         seedvr2_layout.addSpacing(20)
         self.tile_check = QCheckBox("Tile VAE (low VRAM)")
-        self.tile_check.setChecked(True)
+        self.tile_check.setChecked(False)
         seedvr2_layout.addWidget(self.tile_check)
         seedvr2_layout.addStretch()
         self.seedvr2_options.setVisible(False)
@@ -753,7 +773,11 @@ class UpscalerTab(QWidget):
                 torch.cuda.empty_cache()
 
     def toggle_resolution_filter(self, state):
-        self.resolution_spin.setEnabled(bool(state))
+        auto = bool(state)
+        self.resolution_spin.setEnabled(auto)
+        # In auto mode each image gets its own scale factor, so the manual
+        # spin box is greyed out.
+        self.scale_spin.setEnabled(not auto)
         self.input_widget.update_list()
 
     def selected_model(self):
@@ -834,6 +858,9 @@ class UpscalerTab(QWidget):
             return
 
         device = settings.to_torch_device(settings.get_selected_device_id())
+        # Auto mode: let each worker pick the smallest scale factor that gets
+        # the image's longest side to at least the chosen minimum size.
+        min_size = self.resolution_spin.value() if self.resolution_check.isChecked() else 0
 
         if self.selected_model() == "seedvr2":
             self.worker = SeedVR2UpscaleWorker(
@@ -843,7 +870,11 @@ class UpscalerTab(QWidget):
                 seed=self.seed_spin.value(),
                 color_correction=self.color_combo.currentData(),
                 tile_vae=self.tile_check.isChecked(),
+                min_size=min_size,
             )
+            # SeedVR2 has no model_loaded signal to defer the start -
+            # connect + launch immediately.
+            self._activate_worker()
         else:
             # Reuse the cached model when model + device are unchanged
             cache_key = (self.model_path, device)
@@ -853,16 +884,12 @@ class UpscalerTab(QWidget):
             self.worker = UpscaleWorker(
                 input_paths, self.model_path, self.scale_spin.value(),
                 device=device, model=self._cached_model,
-                owns_model=not use_cached,
+                owns_model=not use_cached, min_size=min_size,
             )
             self.worker.model_loaded.connect(self._on_model_loaded)
 
-    def _on_model_loaded(self, model):
-        """Cache a freshly loaded model for the next run."""
-        device = settings.to_torch_device(settings.get_selected_device_id())
-        self._cached_model = model
-        self._cached_model_key = (self.model_path, device)
-
+    def _activate_worker(self):
+        """Connect the worker's signals, lock the UI and start the thread."""
         self.worker.status.connect(self.update_status)
         self.worker.finished.connect(self.upscale_finished)
 
@@ -877,6 +904,14 @@ class UpscalerTab(QWidget):
         self.status_text.setText("")
         self.worker.start()
 
+    def _on_model_loaded(self, model):
+        """Cache a freshly loaded model for the next run."""
+        device = settings.to_torch_device(settings.get_selected_device_id())
+        self._cached_model = model
+        self._cached_model_key = (self.model_path, device)
+
+        self._activate_worker()
+
     def stop_upscale(self):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
@@ -888,7 +923,7 @@ class UpscalerTab(QWidget):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.input_widget.setEnabled(True)
-        self.scale_spin.setEnabled(True)
+        self.scale_spin.setEnabled(not self.resolution_check.isChecked())
         self.resolution_check.setEnabled(True)
         self.seedvr2_options.setEnabled(True)
         self.model_combo.setEnabled(True)

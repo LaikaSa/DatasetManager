@@ -18,6 +18,7 @@ Reference implementation:
 """
 
 import os
+import math
 import datetime
 
 # Reduce CUDA memory fragmentation ("reserved but unallocated") - must be set
@@ -152,10 +153,11 @@ class SeedVR2UpscaleWorker(QThread):
     finished = Signal()
 
     def __init__(self, input_paths, scale_factor, device="cpu", seed=42,
-                 color_correction="wavelet", tile_vae=True):
+                 color_correction="wavelet", tile_vae=True, min_size=0):
         super().__init__()
         self.input_paths = input_paths if isinstance(input_paths, list) else [input_paths]
         self.scale_factor = float(scale_factor)
+        self.min_size = int(min_size)  # >0 -> auto per-image scale factor
         self.device = device
         self.seed = int(seed)
         self.color_correction = color_correction
@@ -255,9 +257,17 @@ class SeedVR2UpscaleWorker(QThread):
 
         frames, (h, w) = self._load_frame(img_path)
         # SeedVR2 resizes the *shortest edge* to `resolution` (upscale only),
-        # padding to a multiple of 16 internally. Map the scale factor onto that.
-        resolution = int(round(min(h, w) * self.scale_factor))
-        resolution = max(resolution, 16)
+        # padding to a multiple of 16 internally.
+        if self.min_size > 0:
+            # Auto mode: smallest 0.1 step (1.0, 1.1, ...) that brings the
+            # longest side to at least min_size, applied strictly to both
+            # sides so the aspect ratio is kept exactly.
+            steps = math.ceil(self.min_size * 10 / max(w, h) - 1e-9)
+            scale = max(1.0, steps / 10.0)
+            resolution = max(16, int(round(min(h, w) * scale)))
+        else:
+            resolution = int(round(min(h, w) * self.scale_factor))
+            resolution = max(resolution, 16)
 
         # Reset per-run ctx state so batches don't leak across images.
         self.ctx["all_latents"] = []

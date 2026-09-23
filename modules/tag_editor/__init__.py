@@ -6,6 +6,7 @@ from .tag_panel import TagPanel
 from .data_model import DataModel
 from .loading_thread import LoadingThread
 from .parallel_loader import ParallelLoader
+from modules import settings as app_settings
 import os
 import shutil
 from send2trash import send2trash
@@ -39,17 +40,12 @@ class TagEditorTab(QWidget):
         self.backup_cb.setChecked(False)
         self.backup_cb.setToolTip("Save old caption files as .000, .001, etc. before overwriting")
 
-        # Add parallel loading checkbox
-        self.parallel_cb = QCheckBox("Parallel Loading")
-        self.parallel_cb.setToolTip("Use multiple CPU cores to speed up loading (may use more memory)")
-        
         top_layout.addWidget(self.path_input)
         top_layout.addWidget(self.browse_btn)
         top_layout.addWidget(self.load_btn)
         top_layout.addWidget(self.unload_btn)
         top_layout.addWidget(self.save_btn)
         top_layout.addWidget(self.backup_cb)
-        top_layout.addWidget(self.parallel_cb)
         
         layout.addLayout(top_layout)
 
@@ -147,13 +143,12 @@ class TagEditorTab(QWidget):
         # run against a stale gallery while the reload is in flight)
         self.load_btn.setEnabled(False)
         self.unload_btn.setEnabled(False)
-        self.parallel_cb.setEnabled(False)
         self.tag_panel.delete_move_tab.delete_btn.setEnabled(False)
         self.tag_panel.delete_move_tab.move_btn.setEnabled(False)
         self.status_label.setText("Loading...")
 
-        # Start loading thread
-        self.loading_thread = LoadingThread(folder, self.parallel_cb.isChecked())
+        # Start loading thread (parallel flag is the app-wide cog setting)
+        self.loading_thread = LoadingThread(folder, app_settings.is_parallel_enabled())
         self.loading_thread.progress.connect(self.update_loading_status)
         self.loading_thread.finished.connect(self.on_loading_finished)
         self.loading_thread.start()
@@ -193,7 +188,6 @@ class TagEditorTab(QWidget):
         # Re-enable controls
         self.load_btn.setEnabled(True)
         self.unload_btn.setEnabled(True)
-        self.parallel_cb.setEnabled(True)
         self.tag_panel.delete_move_tab.delete_btn.setEnabled(True)
         self.tag_panel.delete_move_tab.move_btn.setEnabled(True)
 

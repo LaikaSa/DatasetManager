@@ -1,9 +1,10 @@
 """
 Global app settings (LM Studio style).
 
-Today this holds one setting - which compute device models are loaded on
-("GPU" in the settings menu) - but it is the single place to add more
-settings later; the cog button's menu in main.py is where they are exposed.
+It holds the compute device models are loaded on ("GPU" in the settings
+menu) and the app-wide "Parallel Loading" switch, both exposed through the
+cog button's menu in main.py; it is the single place to add more settings
+later.
 
 The device selection is stored as an integer CUDA ordinal:
     -1  -> CPU
@@ -23,6 +24,7 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 SETTINGS_ORG = "DatasetManager"
 SETTINGS_APP = "ImageProcessingTool"
 SETTINGS_KEY_GPU_DEVICE = "gpu_device"
+SETTINGS_KEY_PARALLEL = "parallel_loading"
 
 CPU_ID = -1
 
@@ -103,6 +105,21 @@ def to_torch_device(device_id):
     if device_id is None or device_id < 0:
         return "cpu"
     return f"cuda:{device_id}"
+
+
+# ---------------------------------------------------------------------------
+# Parallel processing (single app-wide switch, exposed in the cog menu)
+# ---------------------------------------------------------------------------
+
+def is_parallel_enabled():
+    """Whether multi-core parallel processing is enabled (default off,
+    matching the old per-tab checkboxes' default state)."""
+    return bool(_settings().value(SETTINGS_KEY_PARALLEL, False))
+
+
+def set_parallel_enabled(enabled):
+    """Persist the parallel-processing choice (call when the user toggles it)."""
+    _settings().setValue(SETTINGS_KEY_PARALLEL, bool(enabled))
 
 
 # ---------------------------------------------------------------------------

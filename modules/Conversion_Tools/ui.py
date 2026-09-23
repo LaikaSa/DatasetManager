@@ -2,6 +2,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
                              QPushButton, QCheckBox, QComboBox, QLabel, 
                              QFileDialog, QTabWidget)
 from PySide6.QtCore import Qt, QThread, Signal
+from .. import settings as app_settings
 from .converter import ImageConverter
 from .extension_manager import ExtensionManagerTab
 
@@ -57,15 +58,13 @@ class ConversionTab(QWidget):
         self.browse_btn = QPushButton("Browse")
         self.browse_btn.clicked.connect(self.browse_folder)
         
-        # Checkboxes
+        # Checkboxes (parallel processing is the app-wide cog setting now)
         self.recursive_cb = QCheckBox("Recursive")
-        self.parallel_cb = QCheckBox("Parallel Processing")
         
         # Add all to top layout
         top_layout.addWidget(self.folder_input)
         top_layout.addWidget(self.browse_btn)
         top_layout.addWidget(self.recursive_cb)
-        top_layout.addWidget(self.parallel_cb)
         top_layout.addStretch()  # This will push everything to the left
 
         # Create tab widget for sub-functions
@@ -106,7 +105,6 @@ class ConversionTab(QWidget):
         # Create extension manager tab
         self.extension_manager = ExtensionManagerTab(
             folder_input=self.folder_input,
-            parallel_cb=self.parallel_cb,
             recursive_cb=self.recursive_cb  # Pass the recursive checkbox
         )
 
@@ -133,7 +131,7 @@ class ConversionTab(QWidget):
 
         target_format = self.format_combo.currentText().lower()
         recursive = self.recursive_cb.isChecked()
-        use_parallel = self.parallel_cb.isChecked()  # Get parallel processing state
+        use_parallel = app_settings.is_parallel_enabled()  # App-wide cog setting
 
         # Disable inputs during conversion
         self.set_inputs_enabled(False)

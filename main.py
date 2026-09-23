@@ -68,15 +68,16 @@ class MainWindow(QMainWindow):
         self._start_prewarm()
 
     def _build_settings_button(self):
-        """Create the settings cog in the menu-bar corner with a device picker."""
+        """Create the settings cog at the right end of the tab bar row."""
         self.menuBar().setNativeMenuBar(False)
         self._settings_button = QToolButton()
         self._settings_button.setIcon(app_settings.create_settings_icon())
-        self._settings_button.setToolTip("Settings - choose compute device (GPU/CPU)")
+        self._settings_button.setToolTip("Settings - compute device (GPU/CPU), parallel loading")
         self._settings_button.setPopupMode(QToolButton.InstantPopup)
         self._device_menu = QMenu(self._settings_button)
         self._settings_button.setMenu(self._device_menu)
-        self.menuBar().setCornerWidget(self._settings_button, Qt.Corner.TopRightCorner)
+        # Sit on the tabs row, right-aligned, instead of the menu-bar corner.
+        self.tabs.setCornerWidget(self._settings_button, Qt.Corner.TopRightCorner)
         # Rebuild lazily on first open: list_devices() imports torch, and we
         # don't want that cost (or even the import) at startup.
         self._device_menu.aboutToShow.connect(self._rebuild_device_menu)
@@ -97,10 +98,27 @@ class MainWindow(QMainWindow):
             )
             self._device_menu.addAction(action)
 
+        # App-wide parallel-processing switch (used by the tag editor's
+        # folder loading and the conversion tools' batch operations).
+        self._device_menu.addSeparator()
+        parallel = QAction("Parallel Loading", self._device_menu)
+        parallel.setCheckable(True)
+        parallel.setChecked(app_settings.is_parallel_enabled())
+        parallel.setToolTip(
+            "Use multiple CPU cores to speed up loading and batch processing "
+            "(may use more memory)"
+        )
+        parallel.toggled.connect(self._set_parallel_enabled)
+        self._device_menu.addAction(parallel)
+
     def _select_device(self, device_id):
         app_settings.set_selected_device_id(device_id)
         logger.info("Compute device set to: %s", app_settings.device_label(device_id))
         self._rebuild_device_menu()
+
+    def _set_parallel_enabled(self, enabled):
+        app_settings.set_parallel_enabled(enabled)
+        logger.info("Parallel loading set to: %s", "on" if enabled else "off")
 
     def _build_tab(self, key):
         """Import and construct the tab widget for a key (deferred imports).

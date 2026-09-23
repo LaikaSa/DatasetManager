@@ -6,15 +6,15 @@ import send2trash
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import multiprocessing
+from .. import settings as app_settings
 from ..logger import setup_logger
 
 logger = setup_logger()
 
 class ExtensionManagerTab(QWidget):
-    def __init__(self, folder_input, parallel_cb, recursive_cb):
+    def __init__(self, folder_input, recursive_cb):
         super().__init__()
         self.folder_input = folder_input
-        self.parallel_cb = parallel_cb
         self.recursive_cb = recursive_cb  # Use the shared recursive checkbox
         self.extension_files = defaultdict(list)
         self.init_ui()
@@ -120,7 +120,7 @@ class ExtensionManagerTab(QWidget):
             errors = []
             removed_count = 0
 
-            if self.parallel_cb.isChecked():
+            if app_settings.is_parallel_enabled():
                 with ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                     future_to_file = {
                         executor.submit(self._remove_single_file, file_path): file_path 
@@ -191,7 +191,7 @@ class ExtensionManagerTab(QWidget):
 
             # Classify files (in parallel when asked), then aggregate on the
             # main thread
-            if self.parallel_cb.isChecked() and len(files_to_process) > 1:
+            if app_settings.is_parallel_enabled() and len(files_to_process) > 1:
                 with ThreadPoolExecutor(max_workers=multiprocessing.cpu_count()) as executor:
                     classified = list(executor.map(
                         lambda x: self._classify_file(*x), files_to_process

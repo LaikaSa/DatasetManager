@@ -16,6 +16,8 @@ class TagList(QScrollArea):
         super().__init__()
         self.tag_checkboxes = {}
         self.selected_tags = set()  # Keep track of selected tags
+        self._visible_boxes = []
+        self._column_count = 3
         self.init_ui()
 
     def init_ui(self):
@@ -26,6 +28,27 @@ class TagList(QScrollArea):
         self.grid = QGridLayout(container)
         self.grid.setSpacing(5)
         self.setWidget(container)
+
+    def _target_columns(self) -> int:
+        """Number of columns that fit the viewport without clipping labels."""
+        if not self.tag_checkboxes:
+            return 3
+        widest = max(cb.sizeHint().width() for cb in self.tag_checkboxes.values())
+        available = self.viewport().width() - 20  # grid margins
+        if available <= 0:
+            return 1
+        col_w = min(widest, available)  # overlong tags clip, never overflow
+        return max(1, available // col_w)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        limit = max(1, self.viewport().width() - 20)
+        for cb in self.tag_checkboxes.values():
+            cb.setMaximumWidth(limit)
+        target = self._target_columns()
+        if target != self._column_count and self._visible_boxes:
+            self._column_count = target
+            self.reflow_checkboxes(self._visible_boxes)
 
     def on_tag_toggled(self, tag: str, checked: bool):
         if checked:
@@ -49,19 +72,16 @@ class TagList(QScrollArea):
 
         # Add new tags in frequency order
         sorted_tags = sorted(tag_counts.items(), key=lambda x: (-x[1], x[0]))
-        columns = 3
-        
         for idx, (tag, count) in enumerate(sorted_tags):
             checkbox = QCheckBox(f"{tag} ({count})")
             checkbox.setChecked(tag in checked_tags)
             checkbox.stateChanged.connect(
                 lambda state, t=tag: self.on_tag_toggled(t, bool(state))
             )
-            
-            row = idx // columns
-            col = idx % columns
-            self.grid.addWidget(checkbox, row, col)
+            self.grid.addWidget(checkbox)
             self.tag_checkboxes[tag] = checkbox
+
+        self.reflow_checkboxes(list(self.tag_checkboxes.values()))
 
     def clear_all_checks(self):
         """Clear all checkboxes and selected tags"""
@@ -79,6 +99,7 @@ class TagList(QScrollArea):
                 item.widget().deleteLater()
         self.tag_checkboxes.clear()
         self.selected_tags.clear()
+        self._visible_boxes = []
 
     def get_checked_tags(self) -> set[str]:
         return {tag for tag, cb in self.tag_checkboxes.items() if cb.isChecked()}
@@ -97,10 +118,12 @@ class TagList(QScrollArea):
         self.reflow_checkboxes(visible_boxes)
 
     def reflow_checkboxes(self, visible_boxes):
-        columns = 3
-        for idx, checkbox in enumerate(visible_boxes):
-            row = idx // columns
-            col = idx % columns
+        self._visible_boxes = list(visible_boxes)
+        columns = self._column_count = self._target_columns()
+        limit = max(1, self.viewport().width() - 20)
+        for idx, checkbox in enumerate(self._visible_boxes):
+            checkbox.setMaximumWidth(limit)
+            row, col = divmod(idx, columns)
             self.grid.removeWidget(checkbox)
             self.grid.addWidget(checkbox, row, col)
 

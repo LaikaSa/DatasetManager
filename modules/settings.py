@@ -29,8 +29,17 @@ SETTINGS_KEY_PARALLEL = "parallel_loading"
 CPU_ID = -1
 
 
+_settings_instance = None
+
+
 def _settings():
-    return QSettings(SETTINGS_ORG, SETTINGS_APP)
+    """Single shared QSettings instance. A throwaway per-call instance can be
+    garbage-collected by PySide6 before Qt syncs the write to the registry,
+    which made toggles (e.g. parallel loading) not take effect until restart."""
+    global _settings_instance
+    if _settings_instance is None:
+        _settings_instance = QSettings(SETTINGS_ORG, SETTINGS_APP)
+    return _settings_instance
 
 
 # ---------------------------------------------------------------------------
@@ -89,7 +98,9 @@ def get_selected_device_id():
 
 def set_selected_device_id(device_id):
     """Persist the selection (call this when the user picks a device)."""
-    _settings().setValue(SETTINGS_KEY_GPU_DEVICE, int(device_id))
+    s = _settings()
+    s.setValue(SETTINGS_KEY_GPU_DEVICE, int(device_id))
+    s.sync()
 
 
 def device_label(device_id):
@@ -111,15 +122,30 @@ def to_torch_device(device_id):
 # Parallel processing (single app-wide switch, exposed in the cog menu)
 # ---------------------------------------------------------------------------
 
+def _as_bool(val, default=False):
+    """Coerce a QSettings value to a real bool. The Windows registry backend
+    can hand back the strings 'true'/'false' for booleans, and bool('false')
+    is True - so parse explicitly instead of relying on truthiness."""
+    if val is None:
+        return default
+    if isinstance(val, str):
+        return val.strip().lower() in ("1", "true", "yes", "on")
+    return bool(val)
+
+
 def is_parallel_enabled():
     """Whether multi-core parallel processing is enabled (default off,
     matching the old per-tab checkboxes' default state)."""
-    return bool(_settings().value(SETTINGS_KEY_PARALLEL, False))
+    return _as_bool(_settings().value(SETTINGS_KEY_PARALLEL), False)
 
 
 def set_parallel_enabled(enabled):
-    """Persist the parallel-processing choice (call when the user toggles it)."""
-    _settings().setValue(SETTINGS_KEY_PARALLEL, bool(enabled))
+    """Persist the parallel-processing choice (call when the user toggles it).
+    Stored as 0/1 so it round-trips as a registry DWORD (a bare bool comes
+    back as the string 'true'/'false', which broke the truthiness check)."""
+    s = _settings()
+    s.setValue(SETTINGS_KEY_PARALLEL, int(bool(enabled)))
+    s.sync()
 
 
 # ---------------------------------------------------------------------------

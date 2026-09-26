@@ -32,6 +32,7 @@ class MainWindow(QMainWindow):
         logger.info("Initializing main application")
         self.setWindowTitle("Image Processing Tool")
         self.setMinimumSize(1000, 600)
+        self.resize(1500, 900)  # default GUI size (user can still resize)
         self.setAcceptDrops(True)  # Enable drop for main window
 
         # Used to remember the user's preferred tab order between sessions

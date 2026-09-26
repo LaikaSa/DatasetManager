@@ -1,8 +1,16 @@
-from multiprocessing import Pool, cpu_count
+from multiprocessing import Pool
 from pathlib import Path
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtCore import Qt
 import os
+
+# Cap math-library threads *before* numpy loads: workers only do
+# thumbnail-sized numpy work, and OpenBLAS's default per-core thread pools
+# exhaust the Windows paging file when cpu_count() workers spawn at once.
+for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
+             "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+    os.environ.setdefault(_var, "1")
+
 import numpy as np
 from PIL import Image
 import time  # Add this import
@@ -58,7 +66,11 @@ class ParallelLoader:
             # One Pool per ParallelLoader instance. Each LoadingThread owns
             # its loader and calls stop_pool() when it finishes, so workers
             # always exit from the thread that created the pool.
-            self.pool = Pool(processes=cpu_count())
+            #
+            # Capped at 4: on Windows each spawned worker re-imports the whole
+            # app (run.py -> main -> PySide6) plus numpy/OpenBLAS, so
+            # cpu_count() workers can exhaust the paging file (WinError 1455).
+            self.pool = Pool(processes=min(4, os.cpu_count() or 1))
 
     def stop_pool(self):
         if self.pool:

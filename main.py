@@ -1,10 +1,11 @@
 import importlib
+import json
 import sys
 import threading
 from PySide6.QtWidgets import (QApplication, QMainWindow, QTabWidget, QMenu,
                               QToolButton, QWidget)
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QDragMoveEvent, QAction
-from PySide6.QtCore import Qt, QSettings
+from PySide6.QtCore import Qt, QSettings, QTimer
 from modules.logger import setup_logger
 from modules import settings as app_settings
 # NOTE: the tab modules are intentionally NOT imported here. They pull in
@@ -14,6 +15,7 @@ from modules import settings as app_settings
 # background thread after startup (see _start_prewarm) so the first click
 # doesn't freeze the UI while Python imports the dependencies.
 import os  # Add this for path operations
+from pathlib import Path
 logger = setup_logger()
 
 # tab key -> module path, shared by _build_tab and the pre-warm worker
@@ -26,17 +28,70 @@ TAB_MODULE_PATHS = {
     "conversion": "modules.Conversion_Tools",
 }
 
+# User preferences (tab order, window size) live in config.json at the
+# app root; auto-generated with defaults on first run.
+CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
+DEFAULT_WINDOW_SIZE = [1500, 900]
+
+
+def _default_config(tab_definitions):
+    return {
+        "tab_order": [key for key, _ in tab_definitions],
+        "window_size": list(DEFAULT_WINDOW_SIZE),
+    }
+
+
+def _save_config_file(config, path=CONFIG_FILE):
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+            f.write("\n")
+    except OSError as e:
+        logger.warning("Could not write config %s: %s", path, e)
+
+
+def _legacy_tab_order():
+    """One-time migration: tab order saved in the old QSettings (registry)
+    store, if any. Returns a list of keys or None."""
+    try:
+        saved = QSettings("DatasetManager", "ImageProcessingTool").value("tab_order", [])
+    except Exception:
+        return None
+    if isinstance(saved, str):  # QSettings may return a single str for a 1-item list
+        saved = [saved]
+    return saved if isinstance(saved, list) and saved else None
+
+
+def _load_config_file(path=CONFIG_FILE, tab_definitions=None):
+    """Load config.json; auto-generate with defaults if missing or unreadable.
+
+    When the file is missing, a tab order saved in the old QSettings store
+    is carried over as a one-time migration.
+    """
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+            logger.warning("Config %s is not a JSON object; regenerating", path)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning("Could not read config %s (%s); regenerating", path, e)
+    config = _default_config(tab_definitions)
+    if not path.exists():
+        legacy = _legacy_tab_order()
+        if legacy:
+            config["tab_order"] = legacy  # validated against tab_definitions on use
+    _save_config_file(config, path)
+    return config
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         logger.info("Initializing main application")
         self.setWindowTitle("Image Processing Tool")
         self.setMinimumSize(1000, 600)
-        self.resize(1500, 900)  # default GUI size (user can still resize)
         self.setAcceptDrops(True)  # Enable drop for main window
-
-        # Used to remember the user's preferred tab order between sessions
-        self.settings = QSettings("DatasetManager", "ImageProcessingTool")
 
         # Create tab widget
         self.tabs = QTabWidget()
@@ -53,6 +108,15 @@ class MainWindow(QMainWindow):
             ("tag_editor", "Tags Editor"),
             ("conversion", "Conversion Tools"),
         ]
+        # User preferences (tab order, window size) live in config.json at
+        # the app root; auto-generated with defaults on first run.
+        self.config = _load_config_file(tab_definitions=self.tab_definitions)
+        # Debounced persistence of the window size the user drags it to,
+        # so a corner drag writes once, not once per pixel.
+        self._size_save_timer = QTimer(self)
+        self._size_save_timer.setSingleShot(True)
+        self._size_save_timer.timeout.connect(self._persist_window_size)
+        self._apply_saved_size()
 
         self._building_tab = False  # re-entrancy guard for _ensure_tab_built
         self._built_keys = set()    # tab keys whose real widget is already built
@@ -172,7 +236,7 @@ class MainWindow(QMainWindow):
         tab is first selected.
         """
         label_by_key = {key: label for key, label in self.tab_definitions}
-        saved_order = self.settings.value("tab_order", [])
+        saved_order = self.config.get("tab_order", [])
         if isinstance(saved_order, str):  # QSettings may return a single str for a 1-item list
             saved_order = [saved_order]
 
@@ -183,8 +247,9 @@ class MainWindow(QMainWindow):
         self.tab_keys = []  # index -> key, kept in sync with the actual visual tab order
         self.tab_widgets = {}  # key -> current widget (placeholder until built)
         for key in ordered_keys:
-            self.tabs.addTab(QWidget(), label_by_key[key])
-            self.tab_widgets[key] = self.tabs.currentWidget()
+            placeholder = QWidget()
+            self.tabs.addTab(placeholder, label_by_key[key])
+            self.tab_widgets[key] = placeholder
             self.tab_keys.append(key)
 
         self.tabs.currentChanged.connect(self._ensure_tab_built)
@@ -223,7 +288,36 @@ class MainWindow(QMainWindow):
             i = self.tabs.indexOf(widget)
             if i >= 0:
                 self.tab_keys[i] = key
-        self.settings.setValue("tab_order", self.tab_keys)
+        self.config["tab_order"] = self.tab_keys
+        _save_config_file(self.config)
+
+    def _apply_saved_size(self):
+        """Restore the window size the user last set, else the default."""
+        size = self.config.get("window_size")
+        if (isinstance(size, (list, tuple)) and len(size) == 2
+                and all(isinstance(v, int) and v > 0 for v in size)):
+            self.resize(size[0], size[1])
+        else:
+            self.resize(DEFAULT_WINDOW_SIZE[0], DEFAULT_WINDOW_SIZE[1])
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        # Skip while maximized/minimized so we always store the last
+        # *normal* size, not the work-area size of a maximized window.
+        if self.isMaximized() or self.isMinimized():
+            return
+        self._size_save_timer.start(300)
+
+    def _persist_window_size(self):
+        self.config["window_size"] = [self.width(), self.height()]
+        _save_config_file(self.config)
+
+    def closeEvent(self, event):
+        # Save the final size now (the debounce timer may not have fired
+        # yet for a quick drag-then-close).
+        if not self.isMaximized() and not self.isMinimized():
+            self._persist_window_size()
+        event.accept()
 
     def _current_tab_accepts_drops(self):
         # Only the Upscaler tab has a dropEvent, so only show the "can drop"

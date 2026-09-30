@@ -98,7 +98,9 @@ class CaptionGeneratorTab(QWidget):
         # 1. Folder Selection Section
         folder_layout = QHBoxLayout()
         self.folder_input = QLineEdit()
-        self.folder_input.setPlaceholderText("Enter or paste folder path here...")
+        self.folder_input.setPlaceholderText("Enter folder path...")
+        self.folder_input.setMinimumWidth(300)
+        self.folder_input.setMaximumWidth(400)
         self.folder_btn = QPushButton("Browse")
         self.folder_btn.clicked.connect(self.select_folder)
         self.recursive_checkbox = QCheckBox("Recursive")
@@ -106,6 +108,7 @@ class CaptionGeneratorTab(QWidget):
         folder_layout.addWidget(self.folder_input)
         folder_layout.addWidget(self.folder_btn)
         folder_layout.addWidget(self.recursive_checkbox)
+        folder_layout.addStretch()
         
         # 2. Model Selection Section
         model_layout = QHBoxLayout()
@@ -451,7 +454,6 @@ class CaptionGeneratorTab(QWidget):
             self.status_text.append(f"Valid folder path: {path}")
             self._folder_logged_path = path
         self.process_btn.setEnabled(valid)
-        self.folder_input.setStyleSheet("" if valid else "background-color: #FFE6E6;")
 
     def initialize_captioner(self):
         try:

@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
                              QFileDialog, QTabWidget)
 from PySide6.QtCore import Qt, QThread, Signal
 from .. import settings as app_settings
-from .converter import ImageConverter
+from .converter import ImageConverter, IccProfileFixer
 from .extension_manager import ExtensionManagerTab
 
 class ConversionWorker(QThread):
@@ -36,10 +36,41 @@ class ConversionWorker(QThread):
     def stop(self):
         self.is_running = False
 
+class IccFixWorker(QThread):
+    finished = Signal(dict)
+    error = Signal(str)
+
+    def __init__(self, fixer, folder_path, recursive, backup, dry_run):
+        super().__init__()
+        self.fixer = fixer
+        self.folder_path = folder_path
+        self.recursive = recursive
+        self.backup = backup
+        self.dry_run = dry_run
+        self.is_running = True
+
+    def run(self):
+        try:
+            counts = self.fixer.fix_folder(
+                self.folder_path,
+                self.recursive,
+                self.backup,
+                self.dry_run,
+                lambda: not self.is_running
+            )
+            if self.is_running:
+                self.finished.emit(counts)
+        except Exception as e:
+            self.error.emit(str(e))
+
+    def stop(self):
+        self.is_running = False
+
 class ConversionTab(QWidget):
     def __init__(self):
         super().__init__()
         self.converter = ImageConverter()
+        self.icc_fixer = IccProfileFixer()
         self.worker = None
         self.init_ui()
 
@@ -95,10 +126,38 @@ class ConversionTab(QWidget):
         button_layout.addWidget(self.convert_btn)
         button_layout.addWidget(self.stop_btn)
 
+        # ICC profile fixing
+        icc_layout = QHBoxLayout()
+        self.icc_btn = QPushButton("Fix ICC Profiles")
+        self.icc_btn.setToolTip(
+            "Strip embedded ICC profiles from all images in the folder "
+            "(recursively if Recursive is checked) so tools like kohya / "
+            "LoRA training / Qt imageio stop warning about incorrect sRGB profiles. "
+            "Non-RGB images are normalized to RGB."
+        )
+        self.icc_btn.clicked.connect(self.start_icc_fix)
+        self.icc_dry_run_cb = QCheckBox("Dry run")
+        self.icc_dry_run_cb.setToolTip(
+            "Only scan and report how many files would be changed, "
+            "without modifying any files."
+        )
+        self.icc_backup_cb = QCheckBox("Backups (.bak)")
+        self.icc_backup_cb.setToolTip(
+            "Save a copy of each modified file as <filename>.ext.bak "
+            "before overwriting it. Delete the .bak files once you've "
+            "verified the results."
+        )
+        self.icc_backup_cb.setChecked(True)
+        icc_layout.addWidget(self.icc_btn)
+        icc_layout.addWidget(self.icc_dry_run_cb)
+        icc_layout.addWidget(self.icc_backup_cb)
+        icc_layout.addStretch()
+
         # Add elements to conversion layout
         conversion_layout.addLayout(format_layout)
         conversion_layout.addWidget(self.status_label)
         conversion_layout.addLayout(button_layout)
+        conversion_layout.addLayout(icc_layout)
         conversion_layout.addStretch()
         self.conversion_widget.setLayout(conversion_layout)
 
@@ -152,6 +211,43 @@ class ConversionTab(QWidget):
         self.worker.error.connect(self.conversion_error)
         self.worker.start()
 
+    def start_icc_fix(self):
+        folder_path = self.folder_input.text()
+        if not folder_path:
+            self.status_label.setText("Please select a folder")
+            return
+
+        recursive = self.recursive_cb.isChecked()
+        dry_run = self.icc_dry_run_cb.isChecked()
+        backup = self.icc_backup_cb.isChecked()
+
+        # Disable inputs during the run
+        self.set_inputs_enabled(False)
+
+        # Show stop button
+        self.stop_btn.setVisible(True)
+        self.status_label.setText(
+            "Scanning for ICC profiles..." if dry_run else "Fixing ICC profiles..."
+        )
+
+        self.worker = IccFixWorker(
+            self.icc_fixer,
+            folder_path,
+            recursive,
+            backup,
+            dry_run
+        )
+        self.worker.finished.connect(self.icc_fix_finished)
+        self.worker.error.connect(self.conversion_error)
+        self.worker.start()
+
+    def icc_fix_finished(self, counts):
+        verb = "Would fix" if self.icc_dry_run_cb.isChecked() else "Fixed"
+        self.status_label.setText(
+            f"{verb}: {counts['fixed']}  |  Skipped: {counts['skipped']}  |  Errors: {counts['errors']}"
+        )
+        self.cleanup_after_conversion()
+
     def stop_conversion(self):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
@@ -176,4 +272,6 @@ class ConversionTab(QWidget):
         self.browse_btn.setEnabled(enabled)
         self.recursive_cb.setEnabled(enabled)
         self.format_combo.setEnabled(enabled)
-        self.convert_btn.setEnabled(enabled)
+        self.icc_btn.setEnabled(enabled)
+        self.icc_dry_run_cb.setEnabled(enabled)
+        self.icc_backup_cb.setEnabled(enabled)

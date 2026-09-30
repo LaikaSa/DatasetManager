@@ -29,6 +29,8 @@ class TagEditorTab(QWidget):
         # Path input and buttons
         self.path_input = QLineEdit()
         self.path_input.setPlaceholderText("Enter folder path...")
+        self.path_input.setMinimumWidth(300)
+        self.path_input.setMaximumWidth(400)
         self.browse_btn = QPushButton("Browse")
         self.load_btn = QPushButton("Load")
         self.unload_btn = QPushButton("Unload")
@@ -46,6 +48,7 @@ class TagEditorTab(QWidget):
         top_layout.addWidget(self.unload_btn)
         top_layout.addWidget(self.save_btn)
         top_layout.addWidget(self.backup_cb)
+        top_layout.addStretch()
         
         layout.addLayout(top_layout)
 

@@ -47,7 +47,7 @@ class MainWindow(QMainWindow):
         # themselves are created lazily when the tab is first shown.
         self.tab_definitions = [
             ("duplicate", "Duplicate Detection"),
-            ("resizer", "Image Resizer"),
+            ("resizer", "Resizer"),
             ("upscaler", "Upscaler"),
             ("caption", "Caption Generator"),
             ("tag_editor", "Tags Editor"),

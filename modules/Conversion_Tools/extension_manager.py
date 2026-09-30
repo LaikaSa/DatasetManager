@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
                               QLabel, QListWidget, QCheckBox, QMessageBox)
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 import os
 import send2trash
 from collections import defaultdict
@@ -24,18 +24,15 @@ class ExtensionManagerTab(QWidget):
 
         # Action buttons at the top
         action_buttons_layout = QHBoxLayout()
-        self.scan_btn = QPushButton("Scan Folder")
         self.remove_btn = QPushButton("Remove Selected")
         self.select_all_btn = QPushButton("Select All")
         self.deselect_all_btn = QPushButton("Deselect All")
         
         self.remove_btn.setEnabled(False)
-        self.scan_btn.clicked.connect(self.scan_folder)
         self.remove_btn.clicked.connect(self.remove_selected)
         self.select_all_btn.clicked.connect(self.select_all_extensions)
         self.deselect_all_btn.clicked.connect(self.deselect_all_extensions)
         
-        action_buttons_layout.addWidget(self.scan_btn)
         action_buttons_layout.addWidget(self.remove_btn)
         action_buttons_layout.addWidget(self.select_all_btn)
         action_buttons_layout.addWidget(self.deselect_all_btn)
@@ -54,6 +51,15 @@ class ExtensionManagerTab(QWidget):
         layout.addWidget(self.extensions_label)
         layout.addWidget(self.extensions_list)
         layout.addWidget(self.stats_label)
+
+
+        # Auto-scan whenever the folder path changes (debounced so typing a
+        # long path doesn't trigger a scan per keystroke)
+        self._scan_timer = QTimer(self)
+        self._scan_timer.setSingleShot(True)
+        self._scan_timer.setInterval(400)
+        self._scan_timer.timeout.connect(self.scan_folder)
+        self.folder_input.textChanged.connect(lambda _text: self._scan_timer.start())
 
         self.setLayout(layout)
 
@@ -166,11 +172,23 @@ class ExtensionManagerTab(QWidget):
             self.scan_folder()
 
     def scan_folder(self):
-        folder_path = self.folder_input.text()
+        folder_path = self.folder_input.text().strip()
+        if not folder_path:
+            # normpath("") is "." which would scan the CWD
+            self.extension_files.clear()
+            self.extensions_list.clear()
+            self.stats_label.setText("")
+            self.remove_btn.setEnabled(False)
+            return
         folder_path = os.path.normpath(folder_path)
         
-        if not folder_path or not os.path.exists(folder_path):
-            QMessageBox.warning(self, "Error", "Please select a valid folder first")
+        if not os.path.exists(folder_path):
+            # Auto-scan runs on every path change, so show a hint in the
+            # stats label instead of popping a dialog mid-typing
+            self.extension_files.clear()
+            self.extensions_list.clear()
+            self.stats_label.setText(f"Folder not found: {folder_path}")
+            self.remove_btn.setEnabled(False)
             return
 
         self.extension_files.clear()

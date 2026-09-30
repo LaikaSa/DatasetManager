@@ -586,10 +586,13 @@ class DuplicateDetectorTab(QWidget):
         # Create folder selection layout
         folder_layout = QHBoxLayout()
         self.folder_path_input = QLineEdit()
-        self.folder_path_input.setPlaceholderText("Enter or paste folder path here")
+        self.folder_path_input.setPlaceholderText("Enter folder path...")
+        self.folder_path_input.setMinimumWidth(300)
+        self.folder_path_input.setMaximumWidth(400)
         self.browse_btn = QPushButton("Browse")
         folder_layout.addWidget(self.folder_path_input)
         folder_layout.addWidget(self.browse_btn)
+        folder_layout.addStretch()
 
         # Status label
         self.status_label = QLabel("No folder selected")

@@ -85,12 +85,12 @@ class ImageResizerTab(QWidget):
 
         # Folder selection
         folder_layout = QHBoxLayout()
-        self.folder_path_input = QLineEdit()
-        self.folder_path_input.setPlaceholderText("Enter folder path...")
-        self.folder_path_input.setMinimumWidth(300)
-        self.folder_path_input.setMaximumWidth(400)
+        self.path_input = QLineEdit()
+        self.path_input.setPlaceholderText("Enter folder path...")
+        self.path_input.setMinimumWidth(300)
+        self.path_input.setMaximumWidth(400)
         self.browse_btn = QPushButton("Browse")
-        folder_layout.addWidget(self.folder_path_input)
+        folder_layout.addWidget(self.path_input)
         folder_layout.addWidget(self.browse_btn)
         folder_layout.addStretch()
 
@@ -144,7 +144,7 @@ class ImageResizerTab(QWidget):
 
         # Connect signals
         self.browse_btn.clicked.connect(self.browse_folder)
-        self.folder_path_input.textChanged.connect(self.on_path_changed)
+        self.path_input.textChanged.connect(self.on_path_changed)
         self.start_btn.clicked.connect(self.start_resize)
         self.stop_btn.clicked.connect(self.stop_resize)
 
@@ -153,7 +153,7 @@ class ImageResizerTab(QWidget):
     def browse_folder(self):
         folder_path = QFileDialog.getExistingDirectory(self, "Select Folder")
         if folder_path:
-            self.folder_path_input.setText(folder_path)
+            self.path_input.setText(folder_path)
 
     def on_path_changed(self, path):
         path = path.strip()
@@ -168,7 +168,7 @@ class ImageResizerTab(QWidget):
         if self.worker is not None and self.worker.isRunning():
             return
 
-        folder_path = self.folder_path_input.text().strip()
+        folder_path = self.path_input.text().strip()
         max_resolution = self.resolution_spin.value()
 
         self.worker = ResizeWorker(folder_path, max_resolution)
@@ -179,7 +179,7 @@ class ImageResizerTab(QWidget):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.browse_btn.setEnabled(False)
-        self.folder_path_input.setEnabled(False)
+        self.path_input.setEnabled(False)
         self.status_text.clear()
         
         self.worker.start()
@@ -197,4 +197,4 @@ class ImageResizerTab(QWidget):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.browse_btn.setEnabled(True)
-        self.folder_path_input.setEnabled(True)
+        self.path_input.setEnabled(True)

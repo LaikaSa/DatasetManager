@@ -12,9 +12,9 @@ from ..logger import setup_logger
 logger = setup_logger()
 
 class ExtensionManagerTab(QWidget):
-    def __init__(self, folder_input, recursive_cb):
+    def __init__(self, path_input, recursive_cb):
         super().__init__()
-        self.folder_input = folder_input
+        self.path_input = path_input
         self.recursive_cb = recursive_cb  # Use the shared recursive checkbox
         self.extension_files = defaultdict(list)
         self.init_ui()
@@ -59,7 +59,7 @@ class ExtensionManagerTab(QWidget):
         self._scan_timer.setSingleShot(True)
         self._scan_timer.setInterval(400)
         self._scan_timer.timeout.connect(self.scan_folder)
-        self.folder_input.textChanged.connect(lambda _text: self._scan_timer.start())
+        self.path_input.textChanged.connect(lambda _text: self._scan_timer.start())
 
         self.setLayout(layout)
 
@@ -172,7 +172,7 @@ class ExtensionManagerTab(QWidget):
             self.scan_folder()
 
     def scan_folder(self):
-        folder_path = self.folder_input.text().strip()
+        folder_path = self.path_input.text().strip()
         if not folder_path:
             # normpath("") is "." which would scan the CWD
             self.extension_files.clear()

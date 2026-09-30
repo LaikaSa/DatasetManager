@@ -82,10 +82,10 @@ class ConversionTab(QWidget):
         
         # Folder input (with reduced width) and browse
         folder_layout = QHBoxLayout()
-        self.folder_input = QLineEdit()
-        self.folder_input.setPlaceholderText("Enter folder path...")
-        self.folder_input.setMinimumWidth(300)  # Set a smaller minimum width
-        self.folder_input.setMaximumWidth(400)  # Set a maximum width
+        self.path_input = QLineEdit()
+        self.path_input.setPlaceholderText("Enter folder path...")
+        self.path_input.setMinimumWidth(300)  # Set a smaller minimum width
+        self.path_input.setMaximumWidth(400)  # Set a maximum width
         self.browse_btn = QPushButton("Browse")
         self.browse_btn.clicked.connect(self.browse_folder)
         
@@ -93,7 +93,7 @@ class ConversionTab(QWidget):
         self.recursive_cb = QCheckBox("Recursive")
         
         # Add all to top layout
-        top_layout.addWidget(self.folder_input)
+        top_layout.addWidget(self.path_input)
         top_layout.addWidget(self.browse_btn)
         top_layout.addWidget(self.recursive_cb)
         top_layout.addStretch()  # This will push everything to the left
@@ -118,12 +118,12 @@ class ConversionTab(QWidget):
 
         # Buttons layout
         button_layout = QHBoxLayout()
-        self.convert_btn = QPushButton("Start Conversion")
-        self.convert_btn.clicked.connect(self.start_conversion)
+        self.start_btn = QPushButton("Start Conversion")
+        self.start_btn.clicked.connect(self.start_conversion)
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.clicked.connect(self.stop_conversion)
         self.stop_btn.setVisible(False)
-        button_layout.addWidget(self.convert_btn)
+        button_layout.addWidget(self.start_btn)
         button_layout.addWidget(self.stop_btn)
 
         # ICC profile fixing
@@ -163,7 +163,7 @@ class ConversionTab(QWidget):
 
         # Create extension manager tab
         self.extension_manager = ExtensionManagerTab(
-            folder_input=self.folder_input,
+            path_input=self.path_input,
             recursive_cb=self.recursive_cb  # Pass the recursive checkbox
         )
 
@@ -180,10 +180,10 @@ class ConversionTab(QWidget):
     def browse_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Folder")
         if folder:
-            self.folder_input.setText(folder)
+            self.path_input.setText(folder)
 
     def start_conversion(self):
-        folder_path = self.folder_input.text()
+        folder_path = self.path_input.text()
         if not folder_path:
             self.status_label.setText("Please select a folder")
             return
@@ -212,7 +212,7 @@ class ConversionTab(QWidget):
         self.worker.start()
 
     def start_icc_fix(self):
-        folder_path = self.folder_input.text()
+        folder_path = self.path_input.text()
         if not folder_path:
             self.status_label.setText("Please select a folder")
             return
@@ -268,7 +268,7 @@ class ConversionTab(QWidget):
         self.worker = None
 
     def set_inputs_enabled(self, enabled):
-        self.folder_input.setEnabled(enabled)
+        self.path_input.setEnabled(enabled)
         self.browse_btn.setEnabled(enabled)
         self.recursive_cb.setEnabled(enabled)
         self.format_combo.setEnabled(enabled)

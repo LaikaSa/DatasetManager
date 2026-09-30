@@ -156,21 +156,21 @@ class FilterTab(QWidget):
         # Logic groups - Modified implementation
         combine_group = QGroupBox("Combine Logic")
         combine_layout = QHBoxLayout()
-        self.and_logic = QCheckBox("AND")
-        self.or_logic = QCheckBox("OR")
-        self.and_logic.setChecked(True)
-        combine_layout.addWidget(self.and_logic)
-        combine_layout.addWidget(self.or_logic)
+        self.and_cb = QCheckBox("AND")
+        self.or_cb = QCheckBox("OR")
+        self.and_cb.setChecked(True)
+        combine_layout.addWidget(self.and_cb)
+        combine_layout.addWidget(self.or_cb)
         combine_group.setLayout(combine_layout)
         layout.addWidget(combine_group)
 
         filter_group = QGroupBox("Filter Logic")
         filter_layout = QHBoxLayout()
-        self.positive_logic = QCheckBox("POSITIVE")
-        self.negative_logic = QCheckBox("NEGATIVE")
-        self.positive_logic.setChecked(True)
-        filter_layout.addWidget(self.positive_logic)
-        filter_layout.addWidget(self.negative_logic)
+        self.positive_cb = QCheckBox("POSITIVE")
+        self.negative_cb = QCheckBox("NEGATIVE")
+        self.positive_cb.setChecked(True)
+        filter_layout.addWidget(self.positive_cb)
+        filter_layout.addWidget(self.negative_cb)
         filter_group.setLayout(filter_layout)
         layout.addWidget(filter_group)
 
@@ -181,25 +181,25 @@ class FilterTab(QWidget):
         layout.addStretch()
 
         # Connect logic changes - Modified connections
-        self.and_logic.toggled.connect(self.on_combine_logic_changed)
-        self.or_logic.toggled.connect(self.on_combine_logic_changed)
-        self.positive_logic.toggled.connect(self.on_filter_logic_changed)
-        self.negative_logic.toggled.connect(self.on_filter_logic_changed)
+        self.and_cb.toggled.connect(self.on_combine_logic_changed)
+        self.or_cb.toggled.connect(self.on_combine_logic_changed)
+        self.positive_cb.toggled.connect(self.on_filter_logic_changed)
+        self.negative_cb.toggled.connect(self.on_filter_logic_changed)
 
     def on_combine_logic_changed(self, checked):
         """Handle changes in AND/OR logic"""
-        if self.sender() == self.and_logic and checked:
-            self.or_logic.setChecked(False)
-        elif self.sender() == self.or_logic and checked:
-            self.and_logic.setChecked(False)
+        if self.sender() == self.and_cb and checked:
+            self.or_cb.setChecked(False)
+        elif self.sender() == self.or_cb and checked:
+            self.and_cb.setChecked(False)
         self.emit_filter_change()
 
     def on_filter_logic_changed(self, checked):
         """Handle changes in POSITIVE/NEGATIVE logic"""
-        if self.sender() == self.positive_logic and checked:
-            self.negative_logic.setChecked(False)
-        elif self.sender() == self.negative_logic and checked:
-            self.positive_logic.setChecked(False)
+        if self.sender() == self.positive_cb and checked:
+            self.negative_cb.setChecked(False)
+        elif self.sender() == self.negative_cb and checked:
+            self.positive_cb.setChecked(False)
         self.emit_filter_change()
 
     def clear_filters(self):
@@ -216,8 +216,8 @@ class FilterTab(QWidget):
         self.emit_filter_change()
 
     def emit_filter_change(self):
-        combine_logic = "AND" if self.and_logic.isChecked() else "OR"
-        filter_logic = "POSITIVE" if self.positive_logic.isChecked() else "NEGATIVE"
+        combine_logic = "AND" if self.and_cb.isChecked() else "OR"
+        filter_logic = "POSITIVE" if self.positive_cb.isChecked() else "NEGATIVE"
         logger.debug("Emitting filter: %d tags (%s, %s)",
                      len(self.selected_tags), combine_logic, filter_logic)
         self.filter_changed.emit(self.selected_tags, combine_logic, filter_logic)
@@ -502,8 +502,8 @@ class TagPanel(QWidget):
     def get_current_filter(self):
         """Get current filter settings"""
         tags = self.tag_list.get_checked_tags()
-        combine_logic = "AND" if self.filter_tab.and_logic.isChecked() else "OR"
-        filter_logic = "POSITIVE" if self.filter_tab.positive_logic.isChecked() else "NEGATIVE"
+        combine_logic = "AND" if self.filter_tab.and_cb.isChecked() else "OR"
+        filter_logic = "POSITIVE" if self.filter_tab.positive_cb.isChecked() else "NEGATIVE"
         return tags, combine_logic, filter_logic
 
     def clear_status(self):

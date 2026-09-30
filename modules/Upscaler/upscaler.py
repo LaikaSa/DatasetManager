@@ -434,8 +434,8 @@ class InputWidget(QWidget):
         path_layout.addStretch()
 
         # Info label
-        self.info_label = QLabel("No input selected")
-        self.info_label.setAlignment(Qt.AlignCenter)
+        self.status_label = QLabel("No input selected")
+        self.status_label.setAlignment(Qt.AlignCenter)
 
         # File list
         self.file_list = QListWidget()
@@ -449,7 +449,7 @@ class InputWidget(QWidget):
         self.path_input.textChanged.connect(self.on_path_changed)
 
         layout.addLayout(path_layout)
-        layout.addWidget(self.info_label)
+        layout.addWidget(self.status_label)
         layout.addWidget(self.file_list)
 
     # ── path typing / pasting ──────────────────────────────────────────────
@@ -499,19 +499,19 @@ class InputWidget(QWidget):
         paths = self.selected_paths
 
         # Apply resolution filter if active
-        if self.parent.resolution_check.isChecked():
+        if self.parent.resolution_cb.isChecked():
             max_res = self.parent.resolution_spin.value()
             paths = self.filter_by_resolution(paths, max_res)
-            self.info_label.setText(
+            self.status_label.setText(
                 f"{len(paths)}/{len(self.selected_paths)} files "
                 f"(under {max_res} px)"
             )
         else:
             count = len(paths)
             if count == 1:
-                self.info_label.setText(f"1 file selected: {os.path.basename(paths[0])}")
+                self.status_label.setText(f"1 file selected: {os.path.basename(paths[0])}")
             else:
-                self.info_label.setText(f"{count} files selected")
+                self.status_label.setText(f"{count} files selected")
 
         for p in paths:
             try:
@@ -572,7 +572,7 @@ class InputWidget(QWidget):
         import ctypes
         row = self.file_list.row(item)
         paths = self.selected_paths
-        if self.parent.resolution_check.isChecked():
+        if self.parent.resolution_cb.isChecked():
             paths = self.filter_by_resolution(paths, self.parent.resolution_spin.value())
         if row < len(paths):
             normalized = os.path.normpath(paths[row])
@@ -593,7 +593,7 @@ class InputWidget(QWidget):
     # ── what the worker actually processes ────────────────────────────────
     def get_input_paths(self):
         paths = self.selected_paths
-        if self.parent.resolution_check.isChecked():
+        if self.parent.resolution_cb.isChecked():
             paths = self.filter_by_resolution(paths, self.parent.resolution_spin.value())
         return paths
 
@@ -676,15 +676,15 @@ class UpscalerTab(QWidget):
         scale_layout.addWidget(self.scale_spin)
 
         resolution_layout = QHBoxLayout()
-        self.resolution_check = QCheckBox("Only upscale images smaller than:")
+        self.resolution_cb = QCheckBox("Only upscale images smaller than:")
         self.resolution_spin = QSpinBox()
         self.resolution_spin.setRange(1, 10000)
         self.resolution_spin.setValue(1536)
         self.resolution_spin.setSuffix(' px')
         self.resolution_spin.setEnabled(False)
-        self.resolution_check.stateChanged.connect(self.toggle_resolution_filter)
+        self.resolution_cb.stateChanged.connect(self.toggle_resolution_filter)
         self.resolution_spin.valueChanged.connect(self.input_widget.update_list)
-        resolution_layout.addWidget(self.resolution_check)
+        resolution_layout.addWidget(self.resolution_cb)
         resolution_layout.addWidget(self.resolution_spin)
 
         controls_layout.addLayout(scale_layout)
@@ -733,9 +733,9 @@ class UpscalerTab(QWidget):
         seedvr2_layout.addWidget(self.color_combo)
 
         seedvr2_layout.addSpacing(20)
-        self.tile_check = QCheckBox("Tile VAE (low VRAM)")
-        self.tile_check.setChecked(False)
-        seedvr2_layout.addWidget(self.tile_check)
+        self.tile_cb = QCheckBox("Tile VAE (low VRAM)")
+        self.tile_cb.setChecked(False)
+        seedvr2_layout.addWidget(self.tile_cb)
         seedvr2_layout.addStretch()
         self.seedvr2_options.setVisible(False)
         layout.addWidget(self.seedvr2_options)
@@ -863,7 +863,7 @@ class UpscalerTab(QWidget):
         device = settings.to_torch_device(settings.get_selected_device_id())
         # Auto mode: let each worker pick the smallest scale factor that gets
         # the image's longest side to at least the chosen minimum size.
-        min_size = self.resolution_spin.value() if self.resolution_check.isChecked() else 0
+        min_size = self.resolution_spin.value() if self.resolution_cb.isChecked() else 0
 
         if self.selected_model() == "seedvr2":
             self.worker = SeedVR2UpscaleWorker(
@@ -872,7 +872,7 @@ class UpscalerTab(QWidget):
                 device=device,
                 seed=self.seed_spin.value(),
                 color_correction=self.color_combo.currentData(),
-                tile_vae=self.tile_check.isChecked(),
+                tile_vae=self.tile_cb.isChecked(),
                 min_size=min_size,
             )
             # SeedVR2 has no model_loaded signal to defer the start -
@@ -900,7 +900,7 @@ class UpscalerTab(QWidget):
         self.stop_btn.setEnabled(True)
         self.input_widget.setEnabled(False)
         self.scale_spin.setEnabled(False)
-        self.resolution_check.setEnabled(False)
+        self.resolution_cb.setEnabled(False)
         self.resolution_spin.setEnabled(False)
         self.seedvr2_options.setEnabled(False)
         self.model_combo.setEnabled(False)
@@ -926,11 +926,11 @@ class UpscalerTab(QWidget):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.input_widget.setEnabled(True)
-        self.scale_spin.setEnabled(not self.resolution_check.isChecked())
-        self.resolution_check.setEnabled(True)
+        self.scale_spin.setEnabled(not self.resolution_cb.isChecked())
+        self.resolution_cb.setEnabled(True)
         self.seedvr2_options.setEnabled(True)
         self.model_combo.setEnabled(True)
-        if self.resolution_check.isChecked():
+        if self.resolution_cb.isChecked():
             self.resolution_spin.setEnabled(True)
         self.check_input()
 

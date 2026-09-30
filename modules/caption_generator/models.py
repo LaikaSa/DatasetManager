@@ -191,7 +191,7 @@ class ImageCaptioner:
                         include_rating=False):
         try:
             # 1. Initial Setup and Logging
-            if self.debug_mode:  # Use debug_mode instead of debug_checkbox
+            if self.debug_mode:  # Use debug_mode instead of debug_cb
                 logger.debug(f"Generating caption for {os.path.basename(image_path)}")
                 logger.debug("Parameters:")
                 logger.debug(f"  General threshold: {general_threshold}")

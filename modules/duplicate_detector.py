@@ -139,20 +139,20 @@ class ImagePreviewGroup(QWidget):
         image_layout.setContentsMargins(0, 0, 0, 0)
         
         # Create containers for all images but load thumbnails later
-        for img_path in self.images:
+        for image_path in self.images:
             try:
                 img_container = ClickableImageContainer(
-                    img_path,
-                    img_path in self.selected_images,
+                    image_path,
+                    image_path in self.selected_images,
                     self.on_image_clicked,
-                    size=self.sizes.get(img_path),
+                    size=self.sizes.get(image_path),
                     keep_mode=self.keep_mode
                 )
                 image_layout.addWidget(img_container)
                 self.containers.append(img_container)
                 
             except Exception as e:
-                logger.error(f"Error creating container for {img_path}: {str(e)}")
+                logger.error(f"Error creating container for {image_path}: {str(e)}")
 
         image_layout.addStretch()
         scroll_area.setWidget(image_widget)
@@ -161,8 +161,8 @@ class ImagePreviewGroup(QWidget):
         layout.addWidget(scroll_area)
         self.setLayout(layout)
 
-    def on_image_clicked(self, img_path, is_selected):
-        self.selection_callback(img_path, is_selected)
+    def on_image_clicked(self, image_path, is_selected):
+        self.selection_callback(image_path, is_selected)
 
     def set_keep_mode(self, keep_mode):
         """Switch highlight meaning (delete vs keep) without rebuilding the UI."""
@@ -174,13 +174,13 @@ class ImagePreviewGroup(QWidget):
     def set_selection(self, selected_images):
         """Push a new selection set to the already-built containers."""
         for container in self.containers:
-            container.is_selected = container.img_path in selected_images
+            container.is_selected = container.image_path in selected_images
             container.update_style()
 
 class ClickableImageContainer(QWidget):
-    def __init__(self, img_path, is_selected, callback, size=None, keep_mode=False):
+    def __init__(self, image_path, is_selected, callback, size=None, keep_mode=False):
         super().__init__()
-        self.img_path = img_path
+        self.image_path = image_path
         self.is_selected = is_selected
         self.callback = callback
         self.keep_mode = keep_mode
@@ -201,11 +201,11 @@ class ClickableImageContainer(QWidget):
         # extra decode on the main thread per container.
         if size is None:
             try:
-                with Image.open(self.img_path) as img:
+                with Image.open(self.image_path) as img:
                     size = img.size
             except Exception:
                 size = None
-        ext = os.path.splitext(self.img_path)[1].lower()
+        ext = os.path.splitext(self.image_path)[1].lower()
         if size is not None:
             res_text = f"{size[0]} × {size[1]} ({ext})"
         else:
@@ -226,7 +226,7 @@ class ClickableImageContainer(QWidget):
         self.load_thumbnail_later()
 
     def _on_thumbnail_ready(self, image_path, _data):
-        if image_path != self.img_path:
+        if image_path != self.image_path:
             return
         self.load_thumbnail()
 
@@ -243,7 +243,7 @@ class ClickableImageContainer(QWidget):
     def load_thumbnail(self):
         if self.thumbnail_loaded:
             return
-        pixmap = request_thumbnail(self.img_path)
+        pixmap = request_thumbnail(self.image_path)
         if pixmap:
             self.img_label.setPixmap(pixmap)
             self.thumbnail_loaded = True
@@ -252,7 +252,7 @@ class ClickableImageContainer(QWidget):
         if event.button() == Qt.LeftButton:
             self.is_selected = not self.is_selected
             self.update_style()
-            self.callback(self.img_path, self.is_selected)
+            self.callback(self.image_path, self.is_selected)
         elif event.button() == Qt.RightButton:
             self.show_context_menu(event.globalPos())
 
@@ -266,7 +266,7 @@ class ClickableImageContainer(QWidget):
 
     def open_in_folder(self):
         import ctypes
-        normalized = os.path.normpath(self.img_path)
+        normalized = os.path.normpath(self.image_path)
         shell32 = ctypes.windll.shell32
         shell32.ILCreateFromPathW.argtypes = [ctypes.c_wchar_p]
         shell32.ILCreateFromPathW.restype = ctypes.c_void_p
@@ -334,32 +334,32 @@ class WorkerThread(QThread):
 
         # First pass: calculate features for all images
         logger.info("First pass: Calculating features")
-        for idx, img_path in enumerate(image_files):
+        for idx, image_path in enumerate(image_files):
             if not self.is_running:
                 break
 
             try:
                 features = {}
                 if self.use_hash:
-                    with Image.open(img_path) as img:
+                    with Image.open(image_path) as img:
                         features['hash'] = imagehash.average_hash(img)
-                        sizes[img_path] = img.size
+                        sizes[image_path] = img.size
 
                 if self.use_hist:
-                    img_cv = cv2.imread(img_path)
+                    img_cv = cv2.imread(image_path)
                     if img_cv is not None:
                         hist = cv2.calcHist([img_cv], [0, 1, 2], None, [8, 8, 8],
                                         [0, 256, 0, 256, 0, 256])
                         features['hist'] = cv2.normalize(hist, hist).flatten()
-                        if img_path not in sizes:
+                        if image_path not in sizes:
                             h, w = img_cv.shape[:2]
-                            sizes[img_path] = (w, h)
+                            sizes[image_path] = (w, h)
 
-                image_features[img_path] = features
+                image_features[image_path] = features
                 print_progress_bar(idx + 1, total_files, prefix='Processing:')
 
             except Exception as e:
-                logger.error(f"Error processing {img_path}: {str(e)}", exc_info=True)
+                logger.error(f"Error processing {image_path}: {str(e)}", exc_info=True)
 
         print()  # New line after first pass
 
@@ -418,7 +418,7 @@ class WorkerThread(QThread):
             processed_mask = np.zeros(n, dtype=bool)
             processed_count = 0
 
-            for i, img_path in enumerate(paths):
+            for i, image_path in enumerate(paths):
                 if i in processed:
                     continue
 
@@ -509,23 +509,23 @@ class CompareWindow(QWidget):
         n = len(self.image_paths)
         max_w_each = max(1, available_w // n) - 8
 
-        for img_path in self.image_paths:
+        for image_path in self.image_paths:
             col = QWidget()
             col_layout = QVBoxLayout(col)
             col_layout.setContentsMargins(0, 0, 0, 0)
             col_layout.setSpacing(4)
 
             try:
-                with Image.open(img_path) as img:
+                with Image.open(image_path) as img:
                     orig_w, orig_h = img.size
-                ext = os.path.splitext(img_path)[1].lower()
+                ext = os.path.splitext(image_path)[1].lower()
 
                 # Scale to fit, honouring both max_w_each and available_h
                 ratio = min(max_w_each / orig_w, (available_h - 40) / orig_h, 1.0)
                 disp_w = int(orig_w * ratio)
                 disp_h = int(orig_h * ratio)
 
-                pixmap = QPixmap(img_path).scaled(
+                pixmap = QPixmap(image_path).scaled(
                     disp_w, disp_h,
                     Qt.KeepAspectRatio,
                     Qt.SmoothTransformation
@@ -535,7 +535,7 @@ class CompareWindow(QWidget):
                 img_label.setAlignment(Qt.AlignCenter)
 
                 info_label = QLabel(
-                    f"{os.path.basename(img_path)}\n"
+                    f"{os.path.basename(image_path)}\n"
                     f"{orig_w} × {orig_h} ({ext})"
                 )
                 info_label.setAlignment(Qt.AlignCenter)
@@ -544,7 +544,7 @@ class CompareWindow(QWidget):
             except Exception as e:
                 img_label = QLabel(f"Error loading image:\n{str(e)}")
                 img_label.setAlignment(Qt.AlignCenter)
-                info_label = QLabel(os.path.basename(img_path))
+                info_label = QLabel(os.path.basename(image_path))
                 info_label.setAlignment(Qt.AlignCenter)
 
             col_layout.addWidget(img_label)
@@ -585,12 +585,12 @@ class DuplicateDetectorTab(QWidget):
 
         # Create folder selection layout
         folder_layout = QHBoxLayout()
-        self.folder_path_input = QLineEdit()
-        self.folder_path_input.setPlaceholderText("Enter folder path...")
-        self.folder_path_input.setMinimumWidth(300)
-        self.folder_path_input.setMaximumWidth(400)
+        self.path_input = QLineEdit()
+        self.path_input.setPlaceholderText("Enter folder path...")
+        self.path_input.setMinimumWidth(300)
+        self.path_input.setMaximumWidth(400)
         self.browse_btn = QPushButton("Browse")
-        folder_layout.addWidget(self.folder_path_input)
+        folder_layout.addWidget(self.path_input)
         folder_layout.addWidget(self.browse_btn)
         folder_layout.addStretch()
 
@@ -607,10 +607,10 @@ class DuplicateDetectorTab(QWidget):
 
         # Checkbox layout (horizontal)
         checkbox_layout = QHBoxLayout()
-        self.hash_checkbox = QCheckBox("Use Perceptual Hashing")
-        self.hist_checkbox = QCheckBox("Use Color Histogram")
-        checkbox_layout.addWidget(self.hash_checkbox)
-        checkbox_layout.addWidget(self.hist_checkbox)
+        self.hash_cb = QCheckBox("Use Perceptual Hashing")
+        self.hist_cb = QCheckBox("Use Color Histogram")
+        checkbox_layout.addWidget(self.hash_cb)
+        checkbox_layout.addWidget(self.hist_cb)
         checkbox_layout.addStretch()
 
         # Hashing controls in a collapsible widget
@@ -694,14 +694,14 @@ class DuplicateDetectorTab(QWidget):
         # Navigation controls
         # Selection mode controls
         selection_layout = QHBoxLayout()
-        self.keep_mode_checkbox = QCheckBox(
+        self.keep_mode_cb = QCheckBox(
             "Highlight = keep (unhighlighted images in the group are deleted)"
         )
-        self.select_smaller_checkbox = QCheckBox(
+        self.select_smaller_cb = QCheckBox(
             "Select smaller images (auto-mark everything except the biggest)"
         )
-        selection_layout.addWidget(self.keep_mode_checkbox)
-        selection_layout.addWidget(self.select_smaller_checkbox)
+        selection_layout.addWidget(self.keep_mode_cb)
+        selection_layout.addWidget(self.select_smaller_cb)
         selection_layout.addStretch()
 
         # Navigation controls
@@ -721,10 +721,10 @@ class DuplicateDetectorTab(QWidget):
         self.stop_btn.clicked.connect(self.stop_detection)
         self.prev_btn.clicked.connect(self.show_previous_group)
         self.next_btn.clicked.connect(self.show_next_group)
-        self.hash_checkbox.stateChanged.connect(self.on_hash_checkbox_changed)
-        self.hist_checkbox.stateChanged.connect(self.on_hist_checkbox_changed)
-        self.keep_mode_checkbox.stateChanged.connect(self.on_keep_mode_changed)
-        self.select_smaller_checkbox.stateChanged.connect(self.on_select_smaller_changed)
+        self.hash_cb.stateChanged.connect(self.on_hash_cb_changed)
+        self.hist_cb.stateChanged.connect(self.on_hist_cb_changed)
+        self.keep_mode_cb.stateChanged.connect(self.on_keep_mode_changed)
+        self.select_smaller_cb.stateChanged.connect(self.on_select_smaller_changed)
         
         # Initially disable navigation buttons
         self.prev_btn.setEnabled(False)
@@ -741,7 +741,7 @@ class DuplicateDetectorTab(QWidget):
 
         # Update connections
         self.browse_btn.clicked.connect(self.browse_folder)
-        self.folder_path_input.textChanged.connect(self.on_path_changed)
+        self.path_input.textChanged.connect(self.on_path_changed)
 
     def display_current_group(self):
         if not self.image_groups:
@@ -758,7 +758,7 @@ class DuplicateDetectorTab(QWidget):
         # Checkbox: auto-mark every image except the biggest one, but only the
         # first time a group is shown - afterwards the user's manual additions
         # and removals must survive navigation.
-        if (self.select_smaller_checkbox.isChecked()
+        if (self.select_smaller_cb.isChecked()
                 and id(group) not in self.auto_marked_groups):
             self.auto_marked_groups.add(id(group))
             self.apply_select_smaller([group])
@@ -784,11 +784,11 @@ class DuplicateDetectorTab(QWidget):
         self.compare_window = CompareWindow(group['images'])
         self.compare_window.show()
 
-    def on_selection_changed(self, img_path, is_selected):
+    def on_selection_changed(self, image_path, is_selected):
         if is_selected:
-            self.selected_images.add(img_path)
+            self.selected_images.add(image_path)
         else:
-            self.selected_images.discard(img_path)
+            self.selected_images.discard(image_path)
         self.update_recycle_button()
 
     def get_deletable_images(self):
@@ -858,7 +858,7 @@ class DuplicateDetectorTab(QWidget):
             else:
                 # Back to 'highlight = delete': reset every group
                 self.selected_images.clear()
-            if self.select_smaller_checkbox.isChecked():
+            if self.select_smaller_cb.isChecked():
                 self.auto_marked_groups.update(id(g) for g in self.image_groups)
                 if self.keep_mode:
                     self.visited_groups.update(id(g) for g in self.image_groups)
@@ -912,28 +912,28 @@ class DuplicateDetectorTab(QWidget):
         if reply == QMessageBox.Yes:
             failed_files = []
 
-            for img_path in list(deletable):  # Create a copy of the list
+            for image_path in list(deletable):  # Create a copy of the list
                 try:
                     # Normalize path to handle Windows paths correctly.
                     # normpath may (re)introduce a \\\?\\ long-path prefix
                     # from '//?/' style paths, and the shell trash API rejects it.
-                    normalized_path = strip_long_path_prefix(os.path.normpath(img_path))
+                    normalized_path = strip_long_path_prefix(os.path.normpath(image_path))
                     send2trash(normalized_path)
-                    self.selected_images.remove(img_path)
+                    self.selected_images.remove(image_path)
 
                     # Remove the image from groups
                     for group in self.image_groups[:]:
-                        group['images'] = [img for img in group['images'] if img != img_path]
+                        group['images'] = [img for img in group['images'] if img != image_path]
                         if 'sizes' in group:
-                            group['sizes'].pop(img_path, None)
+                            group['sizes'].pop(image_path, None)
                         if len(group['images']) < 2:
                             self.image_groups.remove(group)
                             self.visited_groups.discard(id(group))
                             self.auto_marked_groups.discard(id(group))
 
                 except Exception as e:
-                    logger.error(f"Failed to move to recycle bin: {img_path} -> {e}")
-                    failed_files.append((img_path, str(e)))
+                    logger.error(f"Failed to move to recycle bin: {image_path} -> {e}")
+                    failed_files.append((image_path, str(e)))
 
             # Free the cached thumbnails of the trashed files
             clear_thumbnail_cache(list(self.selected_images))
@@ -981,12 +981,12 @@ class DuplicateDetectorTab(QWidget):
             self.status_label.setText("Invalid folder path")
             self.update_start_button()
 
-    def on_hash_checkbox_changed(self, state):
+    def on_hash_cb_changed(self, state):
         """Handle hash checkbox state change"""
         self.hash_controls.setVisible(bool(state))
         self.update_start_button()
 
-    def on_hist_checkbox_changed(self, state):
+    def on_hist_cb_changed(self, state):
         """Handle histogram checkbox state change"""
         self.hist_controls.setVisible(bool(state))
         self.update_start_button()
@@ -1002,18 +1002,18 @@ class DuplicateDetectorTab(QWidget):
         folder_path = QFileDialog.getExistingDirectory(self, "Select Folder")
         if folder_path:
             logger.info(f"Selected folder: {folder_path}")
-            self.folder_path_input.setText(folder_path)  # This will trigger on_path_changed
+            self.path_input.setText(folder_path)  # This will trigger on_path_changed
 
     def update_start_button(self):
         self.start_btn.setEnabled(
-            (self.hash_checkbox.isChecked() or self.hist_checkbox.isChecked()) and 
+            (self.hash_cb.isChecked() or self.hist_cb.isChecked()) and 
             self.folder_path is not None
         )
 
     def start_detection(self):
         logger.info("Starting duplicate detection")
-        logger.info(f"Hash detection: {self.hash_checkbox.isChecked()}")
-        logger.info(f"Histogram detection: {self.hist_checkbox.isChecked()}")
+        logger.info(f"Hash detection: {self.hash_cb.isChecked()}")
+        logger.info(f"Histogram detection: {self.hist_cb.isChecked()}")
         logger.info(f"Hash threshold: {self.hash_slider.value()}%")
         logger.info(f"Histogram threshold: {self.hist_slider.value()}%")
         if self.worker is not None and self.worker.isRunning():
@@ -1028,8 +1028,8 @@ class DuplicateDetectorTab(QWidget):
         
         self.worker = WorkerThread(
             self.folder_path,
-            self.hash_checkbox.isChecked(),
-            self.hist_checkbox.isChecked(),
+            self.hash_cb.isChecked(),
+            self.hist_cb.isChecked(),
             self.hash_slider.value() / 100,
             self.hist_slider.value() / 100
         )
@@ -1040,7 +1040,7 @@ class DuplicateDetectorTab(QWidget):
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.browse_btn.setEnabled(False)  # Changed from folder_btn to browse_btn
-        self.folder_path_input.setEnabled(False)  # Also disable the path input during processing
+        self.path_input.setEnabled(False)  # Also disable the path input during processing
         
         self.worker.start()
 
@@ -1054,7 +1054,7 @@ class DuplicateDetectorTab(QWidget):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.browse_btn.setEnabled(True)  # Changed from folder_btn to browse_btn
-        self.folder_path_input.setEnabled(True)  # Re-enable the path input
+        self.path_input.setEnabled(True)  # Re-enable the path input
         
         total_groups = len(self.image_groups)
         if total_groups > 0:

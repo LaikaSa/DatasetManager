@@ -87,7 +87,7 @@ class CaptionGeneratorTab(QWidget):
         try:
             default_model = 'wd-eva02-large-tagger-v3'
             if self.check_model_exists(default_model):
-                self.model_dropdown.setCurrentText(default_model)
+                self.model_combo.setCurrentText(default_model)
             self.on_model_changed()
         except Exception as e:
             print(f"Error setting up default model: {str(e)}")
@@ -97,29 +97,29 @@ class CaptionGeneratorTab(QWidget):
         
         # 1. Folder Selection Section
         folder_layout = QHBoxLayout()
-        self.folder_input = QLineEdit()
-        self.folder_input.setPlaceholderText("Enter folder path...")
-        self.folder_input.setMinimumWidth(300)
-        self.folder_input.setMaximumWidth(400)
-        self.folder_btn = QPushButton("Browse")
-        self.folder_btn.clicked.connect(self.select_folder)
-        self.recursive_checkbox = QCheckBox("Recursive")
-        self.recursive_checkbox.setChecked(False)
-        folder_layout.addWidget(self.folder_input)
-        folder_layout.addWidget(self.folder_btn)
-        folder_layout.addWidget(self.recursive_checkbox)
+        self.path_input = QLineEdit()
+        self.path_input.setPlaceholderText("Enter folder path...")
+        self.path_input.setMinimumWidth(300)
+        self.path_input.setMaximumWidth(400)
+        self.browse_btn = QPushButton("Browse")
+        self.browse_btn.clicked.connect(self.select_folder)
+        self.recursive_cb = QCheckBox("Recursive")
+        self.recursive_cb.setChecked(False)
+        folder_layout.addWidget(self.path_input)
+        folder_layout.addWidget(self.browse_btn)
+        folder_layout.addWidget(self.recursive_cb)
         folder_layout.addStretch()
         
         # 2. Model Selection Section
         model_layout = QHBoxLayout()
         model_label = QLabel("Model:")
-        self.model_dropdown = QComboBox()
-        self.model_dropdown.addItems([
+        self.model_combo = QComboBox()
+        self.model_combo.addItems([
             'wd-eva02-large-tagger-v3',
             'wd-swinv2-tagger-v3',
             'wd-convnext-tagger-v3'
         ])
-        self.model_dropdown.addItem(NATURAL_LANGUAGE_OPTION)
+        self.model_combo.addItem(NATURAL_LANGUAGE_OPTION)
         self.download_btn = QPushButton("Download Model")
         self.download_btn.clicked.connect(self.download_model)
         self.download_btn.hide()
@@ -136,11 +136,11 @@ class CaptionGeneratorTab(QWidget):
         self.llm_url_input.editingFinished.connect(self.on_llm_url_changed)
 
         model_layout.addWidget(model_label)
-        model_layout.addWidget(self.model_dropdown)
+        model_layout.addWidget(self.model_combo)
         model_layout.addWidget(self.download_btn)
         model_layout.addWidget(self.llm_url_input)
         model_layout.addStretch()
-        self.model_dropdown.currentIndexChanged.connect(self.on_model_changed)
+        self.model_combo.currentIndexChanged.connect(self.on_model_changed)
         
         # Caption prefix for natural language mode - only shown when
         # "Natural Language" is selected (mirrors the tag-mode "Prefix tags")
@@ -162,28 +162,28 @@ class CaptionGeneratorTab(QWidget):
         
         # 3. Options Checkboxes Section (WD-tagger only)
         checkbox_layout = QHBoxLayout()
-        self.rating_checkbox = QCheckBox("Include rating tags")
-        self.underscore_checkbox = QCheckBox("Remove underscores")
-        self.append_checkbox = QCheckBox("Append tags")
+        self.rating_cb = QCheckBox("Include rating tags")
+        self.underscore_cb = QCheckBox("Remove underscores")
+        self.append_cb = QCheckBox("Append tags")
         
-        self.rating_checkbox.setChecked(False)
-        self.underscore_checkbox.setChecked(True)
-        self.append_checkbox.setChecked(False)
+        self.rating_cb.setChecked(False)
+        self.underscore_cb.setChecked(True)
+        self.append_cb.setChecked(False)
         
-        self.append_checkbox.setToolTip("Append new tags to existing ones instead of replacing them")
+        self.append_cb.setToolTip("Append new tags to existing ones instead of replacing them")
         
-        checkbox_layout.addWidget(self.rating_checkbox)
-        checkbox_layout.addWidget(self.underscore_checkbox)
-        checkbox_layout.addWidget(self.append_checkbox)
+        checkbox_layout.addWidget(self.rating_cb)
+        checkbox_layout.addWidget(self.underscore_cb)
+        checkbox_layout.addWidget(self.append_cb)
         checkbox_layout.addStretch()
 
         # Debug checkbox stays visible regardless of mode
         debug_layout = QHBoxLayout()
-        self.debug_checkbox = QCheckBox("Debug")
-        self.debug_checkbox.setChecked(False)
-        self.debug_checkbox.setToolTip("Show detailed debug information")
-        self.debug_checkbox.stateChanged.connect(self.toggle_debug_mode)
-        debug_layout.addWidget(self.debug_checkbox)
+        self.debug_cb = QCheckBox("Debug")
+        self.debug_cb.setChecked(False)
+        self.debug_cb.setToolTip("Show detailed debug information")
+        self.debug_cb.stateChanged.connect(self.toggle_debug_mode)
+        debug_layout.addWidget(self.debug_cb)
         debug_layout.addStretch()
         
         # 4. Tags Input Section (WD-tagger only)
@@ -264,16 +264,16 @@ class CaptionGeneratorTab(QWidget):
         self.status_text = QTextEdit()
         self.status_text.setReadOnly(True)
         
-        self.process_btn = QPushButton("Generate Captions")
-        self.process_btn.clicked.connect(self.start_processing)
-        self.process_btn.setEnabled(False)
+        self.start_btn = QPushButton("Generate Captions")
+        self.start_btn.clicked.connect(self.start_processing)
+        self.start_btn.setEnabled(False)
 
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.clicked.connect(self.stop_processing)
         self.stop_btn.setEnabled(False)
 
         process_layout = QHBoxLayout()
-        process_layout.addWidget(self.process_btn)
+        process_layout.addWidget(self.start_btn)
         process_layout.addWidget(self.stop_btn)
         
         # Add all sections to main layout
@@ -288,7 +288,7 @@ class CaptionGeneratorTab(QWidget):
         self.setLayout(layout)
         
         # Connect signals
-        self.folder_input.textChanged.connect(self._on_folder_text_changed)
+        self.path_input.textChanged.connect(self._on_folder_text_changed)
         # The "Valid folder path" status line is logged 500 ms after typing
         # stops (debounced) instead of on every valid prefix while typing.
         self._folder_logged_path = None
@@ -296,7 +296,7 @@ class CaptionGeneratorTab(QWidget):
         self._folder_log_timer.setSingleShot(True)
         self._folder_log_timer.setInterval(500)
         self._folder_log_timer.timeout.connect(
-            lambda: self.validate_folder(self.folder_input.text(), log=True)
+            lambda: self.validate_folder(self.path_input.text(), log=True)
         )
         # The captioner itself is built lazily on the first "Generate
         # Captions" click (see start_processing) to keep startup fast.
@@ -326,7 +326,7 @@ class CaptionGeneratorTab(QWidget):
             self.captioner.debug_mode = bool(state)
 
     def is_natural_language_mode(self):
-        return self.model_dropdown.currentText() == NATURAL_LANGUAGE_OPTION
+        return self.model_combo.currentText() == NATURAL_LANGUAGE_OPTION
 
     def check_model_exists(self, model_name):
         """Check if model files exist in the HuggingFace cache
@@ -350,7 +350,7 @@ class CaptionGeneratorTab(QWidget):
     def on_model_changed(self):
         """Handle model change event"""
         try:
-            model_name = self.model_dropdown.currentText()
+            model_name = self.model_combo.currentText()
             print(f"Model changed to: {model_name}")  # Debug print
 
             if model_name == NATURAL_LANGUAGE_OPTION:
@@ -373,11 +373,11 @@ class CaptionGeneratorTab(QWidget):
                 # Drop any cached captioner so the (heavy) ONNX model is
                 # only (re)built on the next "Generate Captions" click
                 self.captioner = None
-                self.validate_folder(self.folder_input.text())
+                self.validate_folder(self.path_input.text())
             else:
                 print(f"Model files not found for {model_name}")  # Debug print
                 self.download_btn.show()
-                self.process_btn.setEnabled(False)
+                self.start_btn.setEnabled(False)
                 self.captioner = None
                 self.status_text.append(f"Model {model_name} not found. Click Download Model to download it.")
         except Exception as e:
@@ -395,13 +395,13 @@ class CaptionGeneratorTab(QWidget):
         """Download the selected model into the shared HuggingFace cache
         (~/.cache/huggingface/hub) - in a worker thread, with progress."""
         try:
-            model_name = self.model_dropdown.currentText()
+            model_name = self.model_combo.currentText()
             model_info = ImageCaptioner.MODELS[model_name]
             repo_id = model_info['repo_id']
 
             # Disable UI elements during download
             self.download_btn.setEnabled(False)
-            self.model_dropdown.setEnabled(False)
+            self.model_combo.setEnabled(False)
             self.download_btn.setText("Downloading...")
             self.status_text.append(f"Downloading {model_name} from {repo_id}...")
 
@@ -417,16 +417,16 @@ class CaptionGeneratorTab(QWidget):
             self.status_text.append(error_msg)
             logger.error(error_msg)
             self.download_btn.setEnabled(True)
-            self.model_dropdown.setEnabled(True)
+            self.model_combo.setEnabled(True)
             self.download_btn.setText("Retry Download")
 
     def _on_download_status(self, text):
         self.status_text.append(text)
 
     def _download_done(self, ok):
-        model_name = self.model_dropdown.currentText()
+        model_name = self.model_combo.currentText()
         self.download_btn.setEnabled(True)
-        self.model_dropdown.setEnabled(True)
+        self.model_combo.setEnabled(True)
 
         if ok and self.check_model_exists(model_name):
             self.download_btn.setText("Download Model")
@@ -435,7 +435,7 @@ class CaptionGeneratorTab(QWidget):
             self.download_btn.hide()
             self.captioner = None
             self.status_text.append(f"Model {model_name} downloaded successfully!")
-            self.validate_folder(self.folder_input.text())
+            self.validate_folder(self.path_input.text())
         else:
             self.download_btn.setText("Retry Download")
             self.status_text.append(f"Model {model_name} download failed")
@@ -453,21 +453,21 @@ class CaptionGeneratorTab(QWidget):
         if log and valid and self._folder_logged_path != path:
             self.status_text.append(f"Valid folder path: {path}")
             self._folder_logged_path = path
-        self.process_btn.setEnabled(valid)
+        self.start_btn.setEnabled(valid)
 
     def initialize_captioner(self):
         try:
-            model_name = self.model_dropdown.currentText()
+            model_name = self.model_combo.currentText()
 
             if model_name == NATURAL_LANGUAGE_OPTION:
                 base_url = self.llm_url_input.text().strip() or DEFAULT_LOCAL_LLM_URL
                 self.captioner = LocalLLMCaptioner(
                     base_url,
-                    debug_mode=self.debug_checkbox.isChecked()
+                    debug_mode=self.debug_cb.isChecked()
                 )
                 self.status_text.append(f"Using local LLM at {base_url} for natural language captions")
                 logger.info(f"Natural language captioner configured for {base_url}")
-                self.validate_folder(self.folder_input.text())
+                self.validate_folder(self.path_input.text())
                 return
 
             print(f"Initializing captioner with model: {model_name}")
@@ -476,13 +476,13 @@ class CaptionGeneratorTab(QWidget):
                 print(f"Model files not found during initialization")
                 self.status_text.append(f"Model {model_name} not found. Please download it first.")
                 self.download_btn.show()
-                self.process_btn.setEnabled(False)
+                self.start_btn.setEnabled(False)
                 return
             
             # Pass debug state and the globally selected device when creating captioner
             self.captioner = ImageCaptioner(
                 model_name,
-                debug_mode=self.debug_checkbox.isChecked(),
+                debug_mode=self.debug_cb.isChecked(),
                 device_id=settings.get_selected_device_id()
             )
             
@@ -493,20 +493,20 @@ class CaptionGeneratorTab(QWidget):
             logger.info(f"Caption model {model_name} loaded successfully")
             
             # Enable process button if folder is valid
-            self.validate_folder(self.folder_input.text())
+            self.validate_folder(self.path_input.text())
             
         except Exception as e:
             error_msg = f"Error loading caption model: {str(e)}"
             print(f"Initialization error: {error_msg}")
             self.status_text.append(error_msg)
             logger.error(error_msg)
-            self.process_btn.setEnabled(False)
+            self.start_btn.setEnabled(False)
             self.captioner = None
 
     def select_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Folder")
         if folder:
-            self.folder_input.setText(folder)  # Changed from folder_label to folder_input
+            self.path_input.setText(folder)  # Changed from folder_label to path_input
 
     def process_undesired_tags(self, tags_input):
         """Process undesired tags input to handle both underscore and space versions"""
@@ -538,22 +538,22 @@ class CaptionGeneratorTab(QWidget):
 
     def set_controls_enabled(self, enabled):
         """Enable/disable the controls that shouldn't change while a job is running"""
-        self.process_btn.setEnabled(enabled)
-        self.folder_btn.setEnabled(enabled)
-        self.folder_input.setEnabled(enabled)
-        self.recursive_checkbox.setEnabled(enabled)
-        self.model_dropdown.setEnabled(enabled)
+        self.start_btn.setEnabled(enabled)
+        self.browse_btn.setEnabled(enabled)
+        self.path_input.setEnabled(enabled)
+        self.recursive_cb.setEnabled(enabled)
+        self.model_combo.setEnabled(enabled)
         self.llm_url_input.setEnabled(enabled)
         self.caption_prefix_input.setEnabled(enabled)
         self.undesired_input.setEnabled(enabled)
         self.prefix_input.setEnabled(enabled)
-        self.append_checkbox.setEnabled(enabled)
-        self.rating_checkbox.setEnabled(enabled)
-        self.underscore_checkbox.setEnabled(enabled)
+        self.append_cb.setEnabled(enabled)
+        self.rating_cb.setEnabled(enabled)
+        self.underscore_cb.setEnabled(enabled)
         self.stop_btn.setEnabled(not enabled)
 
     def start_processing(self):
-        folder_path = self.folder_input.text()
+        folder_path = self.path_input.text()
         if not os.path.isdir(folder_path):
             QMessageBox.warning(self, "Error", "Please select a valid folder")
             return
@@ -589,7 +589,7 @@ class CaptionGeneratorTab(QWidget):
             self.worker = NaturalLanguageCaptionThread(
                 self.captioner,
                 folder_path,
-                recursive=self.recursive_checkbox.isChecked(),
+                recursive=self.recursive_cb.isChecked(),
                 caption_prefix=caption_prefix,
             )
             self.worker.caption_generated.connect(self.update_status)
@@ -600,7 +600,7 @@ class CaptionGeneratorTab(QWidget):
             logger.info(f"Starting natural language caption generation with settings:")
             logger.info(f"Folder: {folder_path}")
             logger.info(f"Local LLM URL: {self.captioner.base_url}")
-            logger.info(f"Recursive: {self.recursive_checkbox.isChecked()}")
+            logger.info(f"Recursive: {self.recursive_cb.isChecked()}")
             logger.info(f"Caption prefix: {caption_prefix}")
 
             self.worker.start()
@@ -619,12 +619,12 @@ class CaptionGeneratorTab(QWidget):
         self.worker = CaptionGeneratorThread(
             self.captioner, 
             folder_path,
-            include_rating=self.rating_checkbox.isChecked(),
-            remove_underscore=self.underscore_checkbox.isChecked(),
-            recursive=self.recursive_checkbox.isChecked(),
+            include_rating=self.rating_cb.isChecked(),
+            remove_underscore=self.underscore_cb.isChecked(),
+            recursive=self.recursive_cb.isChecked(),
             undesired_tags=undesired_tags,
             prefix_tags=prefix_tags,
-            append_tags=self.append_checkbox.isChecked(),
+            append_tags=self.append_cb.isChecked(),
             thresh=thresh,
             general_threshold=general_threshold,
             character_threshold=character_threshold,
@@ -640,13 +640,13 @@ class CaptionGeneratorTab(QWidget):
         logger.info(f"Starting caption generation with settings:")
         logger.info(f"Folder: {folder_path}")
         logger.info(f"Options:")
-        logger.info(f"  - Append mode: {self.append_checkbox.isChecked()}")
-        logger.info(f"  - Rating tags: {self.rating_checkbox.isChecked()}")
-        logger.info(f"  - Remove underscores: {self.underscore_checkbox.isChecked()}")
-        logger.info(f"  - Recursive: {self.recursive_checkbox.isChecked()}")
+        logger.info(f"  - Append mode: {self.append_cb.isChecked()}")
+        logger.info(f"  - Rating tags: {self.rating_cb.isChecked()}")
+        logger.info(f"  - Remove underscores: {self.underscore_cb.isChecked()}")
+        logger.info(f"  - Recursive: {self.recursive_cb.isChecked()}")
 
         # Detailed info only in debug mode
-        if self.debug_checkbox.isChecked():
+        if self.debug_cb.isChecked():
             logger.debug("Detailed settings:")
             logger.debug(f"  Thresholds:")
             logger.debug(f"    - General: {general_threshold:.3f}")
@@ -668,8 +668,8 @@ class CaptionGeneratorTab(QWidget):
 
     def update_status(self, image_path, caption):
         # Show relative path if recursive, otherwise just filename
-        if self.recursive_checkbox.isChecked():
-            relative_path = os.path.relpath(image_path, self.folder_input.text())
+        if self.recursive_cb.isChecked():
+            relative_path = os.path.relpath(image_path, self.path_input.text())
             self.status_text.append(f"Generated caption for {relative_path}")
         else:
             self.status_text.append(f"Generated caption for {os.path.basename(image_path)}")

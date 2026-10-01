@@ -99,9 +99,10 @@ class LocalLLMCaptioner:
     """Talks to an OpenAI-compatible /v1/chat/completions endpoint to turn
     an image (plus optional existing tags) into a natural-language caption."""
 
-    def __init__(self, base_url, debug_mode=False, request_timeout=300,
+    def __init__(self, base_url, api_key="", debug_mode=False, request_timeout=300,
                  system_prompt_file=None):
         self.base_url = (base_url or "").rstrip('/')
+        self.api_key = (api_key or "").strip()
         self.debug_mode = debug_mode
         self.request_timeout = request_timeout
         self.system_prompt_file = system_prompt_file or DEFAULT_SYSTEM_PROMPT_FILE
@@ -246,9 +247,14 @@ class LocalLLMCaptioner:
             logger.debug(f"Sending {os.path.basename(image_path)} to {self.endpoint} "
                          f"(with tags: {bool(tags_text)})")
 
+        headers = {}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
         response = requests.post(
             self.endpoint,
             json=payload,
+            headers=headers,
             stream=True,
             timeout=self.request_timeout,
         )
@@ -363,7 +369,7 @@ class NaturalLanguageCaptionThread(QThread):
                     return
 
                 try:
-                    tags_text = self._relocate_and_read_tags(image_path, tag_captions_dir)
+                    tags_text = self._read_tags(image_path, tag_captions_dir)
 
                     caption = self.captioner.caption_image(
                         image_path,
@@ -371,6 +377,13 @@ class NaturalLanguageCaptionThread(QThread):
                         should_stop=self._should_stop,
                     )
                     caption = self._apply_prefix(caption)
+
+                    # Only after a caption has been received: move the tag
+                    # file into 'Tag Captions' (which frees <base>.txt),
+                    # then write the natural-language caption into the
+                    # freed name. If the request fails, the tag file stays
+                    # in place so a retry needs no manual cleanup.
+                    self._relocate_tags(image_path, tag_captions_dir)
 
                     txt_path = os.path.splitext(image_path)[0] + '.txt'
                     with open(txt_path, 'w', encoding='utf-8') as f:
@@ -395,15 +408,13 @@ class NaturalLanguageCaptionThread(QThread):
             logger.error(error_msg)
             self.error_occurred.emit(error_msg)
 
-    def _relocate_and_read_tags(self, image_path, tag_captions_dir):
-        """Move any existing Danbooru-tag .txt file beside this image out of
-        the way into the 'Tag Captions' folder (mirroring subfolder structure
-        when recursive), and return its contents so they can be handed to the
-        model. Returns None if there are no existing tags for this image.
+    def _read_tags(self, image_path, tag_captions_dir):
+        """Read the Danbooru-tag .txt file for this image without moving
+        anything. Returns None if there are no existing tags.
 
-        Safe to re-run: if the tag file was already relocated by a previous
-        pass, it's read from its new location instead of being moved again.
-        """
+        The 'Tag Captions' copy takes priority: it only ever exists because
+        an earlier run relocated the real tags there, while a file beside
+        the image with the same name is then a generated caption, not tags."""
         image_dir = os.path.dirname(image_path)
         base_name = os.path.splitext(os.path.basename(image_path))[0]
         original_txt = os.path.join(image_dir, base_name + '.txt')
@@ -412,22 +423,41 @@ class NaturalLanguageCaptionThread(QThread):
         mirrored_dir = os.path.normpath(os.path.join(tag_captions_dir, relative_dir))
         mirrored_txt = os.path.join(mirrored_dir, base_name + '.txt')
 
-        if os.path.exists(original_txt):
-            os.makedirs(mirrored_dir, exist_ok=True)
-            with open(original_txt, 'r', encoding='utf-8') as f:
-                tags_text = f.read().strip()
-            if os.path.exists(mirrored_txt):
-                os.remove(mirrored_txt)  # avoid clobber errors on a repeated run
-            os.replace(original_txt, mirrored_txt)
-            return tags_text if tags_text else None
-
         if os.path.exists(mirrored_txt):
             # Already relocated by an earlier run.
             with open(mirrored_txt, 'r', encoding='utf-8') as f:
                 tags_text = f.read().strip()
             return tags_text if tags_text else None
 
+        if os.path.exists(original_txt):
+            with open(original_txt, 'r', encoding='utf-8') as f:
+                tags_text = f.read().strip()
+            return tags_text if tags_text else None
+
         return None
+
+    def _relocate_tags(self, image_path, tag_captions_dir):
+        """Move the Danbooru-tag .txt file beside this image into the 'Tag
+        Captions' folder (mirroring subfolder structure when recursive),
+        freeing <base>.txt for the natural-language caption. Called only
+        after a caption has been received, so a failed request leaves the
+        tag file in place. No-op when there is no tag file to move, or when
+        an earlier run already relocated it (the file beside the image is
+        then a generated caption, not tags)."""
+        image_dir = os.path.dirname(image_path)
+        base_name = os.path.splitext(os.path.basename(image_path))[0]
+        original_txt = os.path.join(image_dir, base_name + '.txt')
+        if not os.path.exists(original_txt):
+            return
+
+        relative_dir = os.path.relpath(image_dir, self.folder_path)
+        mirrored_dir = os.path.normpath(os.path.join(tag_captions_dir, relative_dir))
+        mirrored_txt = os.path.join(mirrored_dir, base_name + '.txt')
+        if os.path.exists(mirrored_txt):
+            return  # tags already relocated; original is a generated caption
+
+        os.makedirs(mirrored_dir, exist_ok=True)
+        os.replace(original_txt, mirrored_txt)
 
     def _get_image_files(self, folder_path):
         image_files = []

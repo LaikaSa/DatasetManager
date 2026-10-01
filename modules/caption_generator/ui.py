@@ -19,7 +19,7 @@ from modules.logger import setup_logger
 logger = setup_logger()
 
 NATURAL_LANGUAGE_OPTION = "Natural Language"
-DEFAULT_LOCAL_LLM_URL = "http://127.0.0.1:1234"
+DEFAULT_LOCAL_LLM_URL = "http://127.0.0.1:8890"
 
 
 class _HFProgressTqdm:
@@ -133,12 +133,25 @@ class CaptionGeneratorTab(QWidget):
             f"Default is LM Studio's local server ({DEFAULT_LOCAL_LLM_URL})."
         )
         self.llm_url_input.hide()
-        self.llm_url_input.editingFinished.connect(self.on_llm_url_changed)
+        self.llm_url_input.editingFinished.connect(self.on_llm_settings_changed)
+
+        # API key for servers that require authentication - only shown when
+        # "Natural Language" is selected
+        self.llm_api_key_input = QLineEdit()
+        self.llm_api_key_input.setPlaceholderText("API key (optional)")
+        self.llm_api_key_input.setEchoMode(QLineEdit.Password)
+        self.llm_api_key_input.setToolTip(
+            "API key sent as 'Authorization: Bearer <key>' with every request.\n"
+            "Leave empty for open local servers that accept all traffic."
+        )
+        self.llm_api_key_input.hide()
+        self.llm_api_key_input.editingFinished.connect(self.on_llm_settings_changed)
 
         model_layout.addWidget(model_label)
         model_layout.addWidget(self.model_combo)
         model_layout.addWidget(self.download_btn)
         model_layout.addWidget(self.llm_url_input)
+        model_layout.addWidget(self.llm_api_key_input)
         model_layout.addStretch()
         self.model_combo.currentIndexChanged.connect(self.on_model_changed)
         
@@ -356,6 +369,7 @@ class CaptionGeneratorTab(QWidget):
             if model_name == NATURAL_LANGUAGE_OPTION:
                 self.download_btn.hide()
                 self.llm_url_input.show()
+                self.llm_api_key_input.show()
                 self.nl_prefix_container.show()
                 self.wd_options_container.hide()
                 # The (lightweight) LLM captioner is rebuilt with the current
@@ -364,6 +378,7 @@ class CaptionGeneratorTab(QWidget):
                 return
 
             self.llm_url_input.hide()
+            self.llm_api_key_input.hide()
             self.nl_prefix_container.hide()
             self.wd_options_container.show()
             
@@ -384,10 +399,10 @@ class CaptionGeneratorTab(QWidget):
             print(f"Error in on_model_changed: {str(e)}")  # Debug print
             self.status_text.append(f"Error changing model: {str(e)}")
 
-    def on_llm_url_changed(self):
-        """Invalidate the cached captioner when the URL field is edited.
-        A fresh captioner with the new URL is built on the next
-        "Generate Captions" click."""
+    def on_llm_settings_changed(self):
+        """Invalidate the cached captioner when the URL or API key field is
+        edited. A fresh captioner with the new settings is built on the
+        next "Generate Captions" click."""
         if self.is_natural_language_mode():
             self.captioner = None
 
@@ -461,8 +476,10 @@ class CaptionGeneratorTab(QWidget):
 
             if model_name == NATURAL_LANGUAGE_OPTION:
                 base_url = self.llm_url_input.text().strip() or DEFAULT_LOCAL_LLM_URL
+                api_key = self.llm_api_key_input.text().strip()
                 self.captioner = LocalLLMCaptioner(
                     base_url,
+                    api_key=api_key,
                     debug_mode=self.debug_cb.isChecked()
                 )
                 self.status_text.append(f"Using local LLM at {base_url} for natural language captions")
@@ -600,6 +617,7 @@ class CaptionGeneratorTab(QWidget):
             logger.info(f"Starting natural language caption generation with settings:")
             logger.info(f"Folder: {folder_path}")
             logger.info(f"Local LLM URL: {self.captioner.base_url}")
+            logger.info(f"Local LLM API key: {'set' if self.captioner.api_key else 'not set'}")
             logger.info(f"Recursive: {self.recursive_cb.isChecked()}")
             logger.info(f"Caption prefix: {caption_prefix}")
 

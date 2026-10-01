@@ -41,10 +41,25 @@ def _default_config(tab_definitions):
     }
 
 
-def _save_config_file(config, path=CONFIG_FILE):
+def _save_config_file(config, path=CONFIG_FILE, merge=True):
+    """Write config.json. With merge=True (the default), keys owned by other
+    parts of the app (e.g. the caption API key) that are not in the
+    in-memory dict are preserved. With merge=False the dict is written
+    as-is - used by migrations, where the dict is the full image of the
+    file and key deletions must be reflected on disk."""
     try:
+        merged = {}
+        if merge and path.exists():
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    merged = data
+            except (OSError, json.JSONDecodeError):
+                pass
+        merged.update(config)
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
+            json.dump(merged, f, indent=2, ensure_ascii=False)
             f.write("\n")
     except OSError as e:
         logger.warning("Could not write config %s: %s", path, e)
@@ -62,11 +77,17 @@ def _legacy_tab_order():
     return saved if isinstance(saved, list) and saved else None
 
 # Legacy standalone caption system-prompt file, kept only for a one-time
-# migration into config.json (key "caption_system_prompt").
+# migration into config.json (key "caption_system_prompt_character").
 LEGACY_SYSTEM_PROMPT_FILE = (
     Path(__file__).resolve().parent / "modules" / "caption_generator" / "systemprompt.json"
 )
+# The caption system prompts live in config.json: one for character
+# training, one for style training; the caption UI picks which is sent.
+# "caption_system_prompt" is the pre-split key, migrated to the character
+# key on first run.
 SYSTEM_PROMPT_CONFIG_KEY = "caption_system_prompt"
+SYSTEM_PROMPT_CONFIG_KEY_CHARACTER = "caption_system_prompt_character"
+SYSTEM_PROMPT_CONFIG_KEY_STYLE = "caption_system_prompt_style"
 
 
 def _read_legacy_system_prompt(legacy_path):
@@ -92,28 +113,35 @@ def _read_legacy_system_prompt(legacy_path):
     return None
 
 
-def _migrate_system_prompt(config, path=CONFIG_FILE):
-    """One-time migration: move the caption system prompt out of the legacy
-    systemprompt.json into config.json (key "caption_system_prompt"), then
-    remove the legacy file. No-op when the key is already set or there is no
-    legacy file to migrate."""
-    if config.get(SYSTEM_PROMPT_CONFIG_KEY):
-        return config
-    if not LEGACY_SYSTEM_PROMPT_FILE.exists():
-        return config
-    prompt = _read_legacy_system_prompt(LEGACY_SYSTEM_PROMPT_FILE)
-    if not prompt:
-        return config
-    config[SYSTEM_PROMPT_CONFIG_KEY] = prompt
-    _save_config_file(config, path)
-    try:
-        LEGACY_SYSTEM_PROMPT_FILE.unlink()
-        logger.info("Migrated caption system prompt into %s and removed %s",
-                    path, LEGACY_SYSTEM_PROMPT_FILE)
-    except OSError as e:
-        logger.warning("Migrated caption system prompt into %s but could not "
-                       "remove the legacy file %s: %s", path,
-                       LEGACY_SYSTEM_PROMPT_FILE, e)
+def _migrate_system_prompts(config, path=CONFIG_FILE):
+    """One-time migration of the caption system prompt into the split
+    config.json keys. The legacy systemprompt.json (or the pre-split
+    "caption_system_prompt" key) is moved to
+    "caption_system_prompt_character", and the pre-split key is removed.
+    The style prompt ("caption_system_prompt_style") is seeded by the
+    caption tab itself, because importing its module is too heavy for the
+    startup path. No-op when everything is already migrated."""
+    changed = False
+    if not config.get(SYSTEM_PROMPT_CONFIG_KEY_CHARACTER):
+        prompt = _read_legacy_system_prompt(LEGACY_SYSTEM_PROMPT_FILE)
+        if prompt:
+            config[SYSTEM_PROMPT_CONFIG_KEY_CHARACTER] = prompt
+            changed = True
+            try:
+                LEGACY_SYSTEM_PROMPT_FILE.unlink()
+                logger.info("Migrated caption system prompt into %s and removed %s",
+                            path, LEGACY_SYSTEM_PROMPT_FILE)
+            except OSError as e:
+                logger.warning("Migrated caption system prompt into %s but could not "
+                               "remove the legacy file %s: %s", path,
+                               LEGACY_SYSTEM_PROMPT_FILE, e)
+    legacy = config.pop(SYSTEM_PROMPT_CONFIG_KEY, None)
+    if legacy and not config.get(SYSTEM_PROMPT_CONFIG_KEY_CHARACTER):
+        config[SYSTEM_PROMPT_CONFIG_KEY_CHARACTER] = legacy
+    if legacy:
+        changed = True  # pre-split key removed (or moved)
+    if changed:
+        _save_config_file(config, path, merge=False)
     return config
 
 
@@ -122,7 +150,7 @@ def _load_config_file(path=CONFIG_FILE, tab_definitions=None):
 
     When the file is missing, a tab order saved in the old QSettings store
     is carried over as a one-time migration. A legacy systemprompt.json is
-    likewise migrated into the "caption_system_prompt" key on first run.
+    likewise migrated into the "caption_system_prompt_character" key.
     """
     config = None
     if path.exists():
@@ -142,7 +170,7 @@ def _load_config_file(path=CONFIG_FILE, tab_definitions=None):
             if legacy:
                 config["tab_order"] = legacy  # validated against tab_definitions on use
         _save_config_file(config, path)
-    _migrate_system_prompt(config, path)
+    _migrate_system_prompts(config, path)
     return config
 
 class MainWindow(QMainWindow):
@@ -171,6 +199,10 @@ class MainWindow(QMainWindow):
         # User preferences (tab order, window size) live in config.json at
         # the app root; auto-generated with defaults on first run.
         self.config = _load_config_file(tab_definitions=self.tab_definitions)
+        # The caption API key is owned by the caption UI (it reads and
+        # writes it directly in config.json); keep it out of this cache so
+        # the saves below never resurrect a key the user cleared.
+        self.config.pop("llm_api_key", None)
         # Debounced persistence of the window size the user drags it to,
         # so a corner drag writes once, not once per pixel.
         self._size_save_timer = QTimer(self)

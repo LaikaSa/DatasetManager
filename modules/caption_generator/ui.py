@@ -5,7 +5,11 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
 from PySide6.QtCore import Qt, QThread, Signal, QTimer
 from .models import ImageCaptioner
 from .processing import CaptionGeneratorThread
-from .local_llm_captioner import LocalLLMCaptioner, NaturalLanguageCaptionThread
+from .local_llm_captioner import (LocalLLMCaptioner, NaturalLanguageCaptionThread,
+                                  SYSTEM_PROMPT_CONFIG_KEY_CHARACTER,
+                                  SYSTEM_PROMPT_CONFIG_KEY_STYLE,
+                                  ensure_style_prompt_in_config,
+                                  load_api_key, save_api_key)
 import os
 import functools
 import multiprocessing
@@ -20,6 +24,8 @@ logger = setup_logger()
 
 NATURAL_LANGUAGE_OPTION = "Natural Language"
 DEFAULT_LOCAL_LLM_URL = "http://127.0.0.1:8890"
+TRAIN_CHARACTER_OPTION = "Train Characters"
+TRAIN_STYLE_OPTION = "Train Style"
 
 
 class _HFProgressTqdm:
@@ -93,6 +99,9 @@ class CaptionGeneratorTab(QWidget):
             print(f"Error setting up default model: {str(e)}")
 
     def init_ui(self):
+        # Make sure the style-training prompt exists in config.json so both
+        # prompts are user-editable there (no-op when already set).
+        ensure_style_prompt_in_config()
         layout = QVBoxLayout()
         
         # 1. Folder Selection Section
@@ -124,6 +133,20 @@ class CaptionGeneratorTab(QWidget):
         self.download_btn.clicked.connect(self.download_model)
         self.download_btn.hide()
 
+        # Training type: selects which system prompt from config.json is
+        # sent to the LLM (character vs style training). Only relevant in
+        # "Natural Language" mode, so hidden otherwise.
+        self.training_type_combo = QComboBox()
+        self.training_type_combo.addItems([TRAIN_CHARACTER_OPTION, TRAIN_STYLE_OPTION])
+        self.training_type_combo.setToolTip(
+            "Which system prompt to send to the LLM (both are editable in "
+            "config.json):\n"
+            f"{TRAIN_CHARACTER_OPTION} - describe the character, for character LoRA training.\n"
+            f"{TRAIN_STYLE_OPTION} - describe the art style, for style LoRA training."
+        )
+        self.training_type_combo.hide()
+        self.training_type_combo.currentIndexChanged.connect(self.on_training_type_changed)
+
         # Local LLM base URL - only shown when "Natural Language" is selected
         self.llm_url_input = QLineEdit()
         self.llm_url_input.setPlaceholderText(DEFAULT_LOCAL_LLM_URL)
@@ -138,17 +161,21 @@ class CaptionGeneratorTab(QWidget):
         # API key for servers that require authentication - only shown when
         # "Natural Language" is selected
         self.llm_api_key_input = QLineEdit()
-        self.llm_api_key_input.setPlaceholderText("API key (optional)")
+        self.llm_api_key_input.setPlaceholderText("API key (save to config.json)")
         self.llm_api_key_input.setEchoMode(QLineEdit.Password)
         self.llm_api_key_input.setToolTip(
             "API key sent as 'Authorization: Bearer <key>' with every request.\n"
+            "Saved to config.json and restored on the next launch.\n"
             "Leave empty for open local servers that accept all traffic."
         )
         self.llm_api_key_input.hide()
         self.llm_api_key_input.editingFinished.connect(self.on_llm_settings_changed)
+        # Restore the API key saved on a previous run (config.json).
+        self.llm_api_key_input.setText(load_api_key())
 
         model_layout.addWidget(model_label)
         model_layout.addWidget(self.model_combo)
+        model_layout.addWidget(self.training_type_combo)
         model_layout.addWidget(self.download_btn)
         model_layout.addWidget(self.llm_url_input)
         model_layout.addWidget(self.llm_api_key_input)
@@ -370,6 +397,7 @@ class CaptionGeneratorTab(QWidget):
                 self.download_btn.hide()
                 self.llm_url_input.show()
                 self.llm_api_key_input.show()
+                self.training_type_combo.show()
                 self.nl_prefix_container.show()
                 self.wd_options_container.hide()
                 # The (lightweight) LLM captioner is rebuilt with the current
@@ -379,6 +407,7 @@ class CaptionGeneratorTab(QWidget):
 
             self.llm_url_input.hide()
             self.llm_api_key_input.hide()
+            self.training_type_combo.hide()
             self.nl_prefix_container.hide()
             self.wd_options_container.show()
             
@@ -399,12 +428,21 @@ class CaptionGeneratorTab(QWidget):
             print(f"Error in on_model_changed: {str(e)}")  # Debug print
             self.status_text.append(f"Error changing model: {str(e)}")
 
-    def on_llm_settings_changed(self):
-        """Invalidate the cached captioner when the URL or API key field is
-        edited. A fresh captioner with the new settings is built on the
-        next "Generate Captions" click."""
+    def on_training_type_changed(self):
+        """Drop the cached captioner when the training type changes in
+        natural-language mode, so the next "Generate Captions" click builds
+        one that sends the other system prompt."""
         if self.is_natural_language_mode():
             self.captioner = None
+
+    def on_llm_settings_changed(self):
+        """Invalidate the cached captioner when the URL or API key field is
+        edited, and persist the API key to config.json so it is restored on
+        the next launch. A fresh captioner with the new settings is built
+        on the next "Generate Captions" click."""
+        if self.is_natural_language_mode():
+            self.captioner = None
+        save_api_key(self.llm_api_key_input.text().strip())
 
     def download_model(self):
         """Download the selected model into the shared HuggingFace cache
@@ -477,10 +515,14 @@ class CaptionGeneratorTab(QWidget):
             if model_name == NATURAL_LANGUAGE_OPTION:
                 base_url = self.llm_url_input.text().strip() or DEFAULT_LOCAL_LLM_URL
                 api_key = self.llm_api_key_input.text().strip()
+                prompt_key = (SYSTEM_PROMPT_CONFIG_KEY_STYLE
+                              if self.training_type_combo.currentText() == TRAIN_STYLE_OPTION
+                              else SYSTEM_PROMPT_CONFIG_KEY_CHARACTER)
                 self.captioner = LocalLLMCaptioner(
                     base_url,
                     api_key=api_key,
-                    debug_mode=self.debug_cb.isChecked()
+                    debug_mode=self.debug_cb.isChecked(),
+                    system_prompt_key=prompt_key
                 )
                 self.status_text.append(f"Using local LLM at {base_url} for natural language captions")
                 logger.info(f"Natural language captioner configured for {base_url}")

@@ -1,25 +1,30 @@
 """
 Natural-language captioning via a local, OpenAI-compatible LLM server
-(LM Studio by default: http://127.0.0.1:1234, but any server exposing the
-same /v1/chat/completions endpoint will work - text-generation-webui,
+(default: http://127.0.0.1:8890, but any server exposing the same
+/v1/chat/completions endpoint will work - LM Studio, text-generation-webui,
 koboldcpp, Ollama's OpenAI-compat endpoint, etc.).
 
 Design notes (see the conversation this was built from for the full spec):
 - A system prompt IS sent with every request, overriding any system prompt
-  configured on the server. It is read from 'systemprompt.json' in this
-  module's directory (created and edited by the user themselves). If that
-  file is missing or unreadable, a built-in default captioning prompt is
-  used instead so captioning never breaks.
+  configured on the server. It is read from config.json at the app root
+  (key "caption_system_prompt", edited by the user themselves). If that key
+  is missing or empty, a built-in default captioning prompt is used instead
+  so captioning never breaks.
 - We send the image, plus the existing Danbooru tags as plain text if there
   are any, in the user turn.
 - Every image is sent as a brand new request (no chat history is kept
   between images) to avoid burning context on unrelated prior turns.
 - Sampling settings (temperature, top_p, etc.) are intentionally NOT sent -
   those are expected to already be configured on the server/model itself.
-- Streaming is used so a Stop button can abort mid-generation. Closing the
-  HTTP connection while it is still streaming causes LM Studio (and most
-  other llama.cpp-based OpenAI-compatible servers) to stop generating on
-  their end too, rather than just abandoning the response on our side.
+- Streaming is used so a Stop button can abort mid-generation. The whole
+  HTTP exchange (post + body reads) runs on a short-lived daemon thread
+  that feeds a queue the worker polls, so Stop works from the moment the
+  request is sent and is acted on within ~0.2 s (requests cannot
+  interrupt a post() blocked before the response headers arrive, and a
+  blocking read can only be observed, not interrupted). Closing the HTTP
+  connection while the server is still streaming causes LM Studio (and
+  most other llama.cpp-based OpenAI-compatible servers) to stop generating
+  on their end too, rather than just abandoning the response on our side.
 - An optional prefix entered in the UI is prepended to each caption before
   it is saved, mirroring the "Prefix tags" behavior of the tag captioner
   (a comma is used as separator unless the prefix already ends with one).
@@ -32,8 +37,11 @@ import base64
 import io
 import json
 import os
+import queue
 import re
+import socket
 import threading
+from pathlib import Path
 
 import requests
 from PIL import Image
@@ -45,13 +53,14 @@ logger = setup_logger()
 
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp')
 
-# User-editable system prompt file, living next to this module.
-DEFAULT_SYSTEM_PROMPT_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "systemprompt.json"
-)
+# The user-editable system prompt lives in config.json at the app root
+# (key "caption_system_prompt"), alongside tab_order and window_size. The
+# app root is two levels up from this module (modules/caption_generator/).
+CONFIG_FILE = Path(__file__).resolve().parents[2] / "config.json"
+SYSTEM_PROMPT_CONFIG_KEY = "caption_system_prompt"
 
-# Fallback system prompt, used only when systemprompt.json is missing or
-# cannot be parsed. It tells the model to write a plain caption and to avoid
+# Fallback system prompt, used only when config.json has no usable
+# "caption_system_prompt". It tells the model to write a plain caption and to avoid
 # grounding/detection output (box_2d / bbox_2d / JSON / tag lists), which is
 # the failure mode this whole feature was added to prevent.
 DEFAULT_SYSTEM_PROMPT = (
@@ -99,17 +108,15 @@ class LocalLLMCaptioner:
     """Talks to an OpenAI-compatible /v1/chat/completions endpoint to turn
     an image (plus optional existing tags) into a natural-language caption."""
 
-    def __init__(self, base_url, api_key="", debug_mode=False, request_timeout=300,
-                 system_prompt_file=None):
+    def __init__(self, base_url, api_key="", debug_mode=False, request_timeout=300):
         self.base_url = (base_url or "").rstrip('/')
         self.api_key = (api_key or "").strip()
         self.debug_mode = debug_mode
         self.request_timeout = request_timeout
-        self.system_prompt_file = system_prompt_file or DEFAULT_SYSTEM_PROMPT_FILE
         self._active_response = None
         self._lock = threading.Lock()
-        # (file-signature, prompt) so we re-read systemprompt.json only when
-        # it changes, and re-emit the "falling back" warning only once.
+        # (config-signature, prompt) so we re-read config.json only when it
+        # changes, and re-emit the "falling back" warning only once.
         self._system_prompt_cache = None
         # Kept only so UI code that checks `captioner.session` (a WD-tagger
         # concept) doesn't need special-casing everywhere it's read.
@@ -143,15 +150,15 @@ class LocalLLMCaptioner:
         return f"data:image/jpeg;base64,{encoded}"
 
     def _load_system_prompt(self):
-        """Read the user's system prompt from systemprompt.json (next to this
-        module). It is sent with every request and overrides any system
-        prompt set on the server. Falls back to DEFAULT_SYSTEM_PROMPT when
-        the file is missing or unreadable, and re-reads automatically when
-        the file changes, so edits take effect without a restart. The file may
-        be valid JSON or plain text (e.g. a Markdown prompt) - both are
-        accepted, since the user edits it themselves."""
+        """Read the user's system prompt from config.json at the app root
+        (key "caption_system_prompt"). It is sent with every request and
+        overrides any system prompt set on the server. Falls back to
+        DEFAULT_SYSTEM_PROMPT when the key is missing or empty, and re-reads
+        automatically when config.json changes, so edits take effect without
+        a restart. (A legacy systemprompt.json is migrated into config.json
+        by main.py on first run.)"""
         try:
-            signature = ("mtime", os.path.getmtime(self.system_prompt_file))
+            signature = ("mtime", os.path.getmtime(CONFIG_FILE))
         except OSError:
             signature = ("missing", None)
 
@@ -159,46 +166,31 @@ class LocalLLMCaptioner:
         if cached is not None and cached[0] == signature:
             return cached[1]
 
-        if signature[0] == "missing":
-            logger.warning(
-                "System prompt file not found: %s - using the built-in default.",
-                self.system_prompt_file,
-            )
-            prompt = DEFAULT_SYSTEM_PROMPT
-        else:
+        prompt = None
+        if signature[0] != "missing":
             try:
-                with open(self.system_prompt_file, "r", encoding="utf-8") as f:
-                    raw = f.read()
-            except OSError as e:
+                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                    config = json.load(f)
+                if isinstance(config, dict):
+                    value = config.get(SYSTEM_PROMPT_CONFIG_KEY)
+                    if isinstance(value, str) and value.strip():
+                        prompt = value.strip()
+            except (OSError, json.JSONDecodeError) as e:
                 logger.warning(
                     "Could not read system prompt from %s (%s) - using the built-in default.",
-                    self.system_prompt_file, e,
+                    CONFIG_FILE, e,
                 )
-                raw = None
 
-            prompt = None
-            if raw:
-                text = raw.strip()
-                if text:
-                    # Accept either valid JSON (an object with a 'system_prompt'
-                    # key, or a bare JSON string) or plain text (e.g. a Markdown
-                    # prompt). If it isn't valid JSON, use the whole file as the
-                    # prompt so the user's existing file works as-is.
-                    try:
-                        prompt = _extract_system_prompt(json.loads(text))
-                    except json.JSONDecodeError:
-                        prompt = text
-
-            if not prompt:
-                logger.warning(
-                    "No usable system prompt in %s - using the built-in default.",
-                    self.system_prompt_file,
-                )
-                prompt = DEFAULT_SYSTEM_PROMPT
+        if not prompt:
+            logger.warning(
+                "No system prompt in %s (key %r) - using the built-in default.",
+                CONFIG_FILE, SYSTEM_PROMPT_CONFIG_KEY,
+            )
+            prompt = DEFAULT_SYSTEM_PROMPT
 
         self._system_prompt_cache = (signature, prompt)
         if self.debug_mode:
-            logger.debug("Using system prompt from %s", self.system_prompt_file)
+            logger.debug("Using system prompt from %s", CONFIG_FILE)
         return prompt
 
     def _build_messages(self, image_path, tags_text):
@@ -219,23 +211,99 @@ class LocalLLMCaptioner:
         messages.append({"role": "user", "content": content})
         return messages
 
+    @staticmethod
+    def _response_reader(response):
+        """Best-effort access to the socket-level buffered reader of a
+        streaming response (urllib3/http.client private attribute chain).
+        Returns None if the chain doesn't match expectations - callers
+        must degrade gracefully."""
+        try:
+            return response.raw._fp.fp
+        except (AttributeError, TypeError):
+            return None
+
+    @staticmethod
+    def _process_sse_line(line, content_parts, should_stop, response):
+        """Process one SSE line of the caption stream, appending any
+        content delta to content_parts. Returns True when the stream is
+        finished ([DONE])."""
+        if should_stop and should_stop():
+            response.close()
+            raise LocalLLMCancelled()
+
+        if not line or not line.startswith("data:"):
+            return False
+
+        data_str = line[len("data:"):].strip()
+        if data_str == "[DONE]":
+            return True
+
+        try:
+            chunk = json.loads(data_str)
+        except json.JSONDecodeError:
+            return False
+
+        choices = chunk.get("choices") or []
+        if not choices:
+            return False
+
+        delta = choices[0].get("delta") or {}
+        # Deliberately only ever read "content" - some models stream
+        # their thinking tokens through a separate "reasoning_content"
+        # field, which we ignore entirely so it never reaches the file.
+        piece = delta.get("content")
+        if piece:
+            content_parts.append(piece)
+        return False
+
     def stop_current_request(self):
         """Abort the in-flight HTTP request, if any. Closing the connection
         while LM Studio is still streaming causes it to stop generating
         server-side too (confirmed behavior: LM Studio logs "Client
-        disconnected. Stopping generation..." when this happens)."""
+        disconnected. Stopping generation..." when this happens).
+
+        The close runs on a short-lived daemon thread: on Windows,
+        close() from a second thread can stall against a read() another
+        thread is blocked in, and a Stop press must never block its
+        caller. The worker notices the stop on its own within ~0.2 s via
+        its queue poll, so this is a server-side-abort optimization, not
+        the stop mechanism. Requests that are still waiting for their
+        first byte have no response to close; the queue poll notices the
+        stop flag itself."""
         with self._lock:
-            if self._active_response is not None:
+            response = self._active_response
+        if response is None:
+            return
+
+        def _close():
+            reader = self._response_reader(response)
+            if reader is not None:
                 try:
-                    self._active_response.close()
-                except Exception:
+                    reader.raw._sock.shutdown(socket.SHUT_RDWR)
+                except (AttributeError, OSError):
                     pass
+            try:
+                response.close()
+            except Exception:
+                pass
+
+        threading.Thread(target=_close, daemon=True).start()
 
     def caption_image(self, image_path, tags_text=None, should_stop=None):
         """Generate a caption for a single image via a brand-new request.
 
         should_stop: optional zero-arg callable returning True if generation
-        should be aborted early (checked between streamed chunks).
+        should be aborted early (checked every ~0.2 s, in both the header
+        and the body phase).
+
+        The whole HTTP exchange (post + streaming body reads) runs on a
+        short-lived daemon thread that feeds a queue: requests offers no
+        way to interrupt a post() blocked before the response headers
+        arrive, and the body is read with read1() (returns as soon as any
+        bytes arrive, unlike read(n), which blocks until n bytes
+        accumulate). The worker polls the queue, so a stop is acted on
+        within ~0.2 s at any point, and the caller is never blocked by
+        the server.
         """
         payload = {
             "model": "local-model",  # ignored by LM Studio when one model is loaded
@@ -251,56 +319,106 @@ class LocalLLMCaptioner:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
-        response = requests.post(
-            self.endpoint,
-            json=payload,
-            headers=headers,
-            stream=True,
-            timeout=self.request_timeout,
-        )
+        stream_queue = queue.Queue()
+
+        def _send_and_stream():
+            try:
+                response = requests.post(
+                    self.endpoint,
+                    json=payload,
+                    headers=headers,
+                    stream=True,
+                    timeout=(5, self.request_timeout),
+                )
+            except Exception as e:
+                stream_queue.put(("error", e))
+                return
+            reader = self._response_reader(response)
+            stream_queue.put(("response", response))
+            try:
+                if reader is not None:
+                    while True:
+                        chunk = reader.read1(65536)
+                        if not chunk:
+                            break
+                        stream_queue.put(("chunk", chunk))
+                else:
+                    # Fallback (urllib3 internals changed): standard
+                    # requests path, one line per item.
+                    for line in response.iter_lines(decode_unicode=True):
+                        stream_queue.put(("line", line))
+                stream_queue.put(("eof", None))
+            except Exception as e:
+                stream_queue.put(("error", e))
+
+        sender = threading.Thread(target=_send_and_stream, daemon=True)
+        sender.start()
+
+        while True:
+            try:
+                kind, value = stream_queue.get(timeout=0.2)
+            except queue.Empty:
+                if should_stop and should_stop():
+                    raise LocalLLMCancelled()
+                continue
+            break
+
+        if kind == "error":
+            raise value
+
+        response = value
+        if should_stop and should_stop():
+            response.close()
+            raise LocalLLMCancelled()
+
         with self._lock:
             self._active_response = response
 
         try:
             response.raise_for_status()
             content_parts = []
-
-            for raw_line in response.iter_lines(decode_unicode=True):
-                if should_stop and should_stop():
-                    response.close()
-                    raise LocalLLMCancelled()
-
-                if not raw_line or not raw_line.startswith("data:"):
-                    continue
-
-                data_str = raw_line[len("data:"):].strip()
-                if data_str == "[DONE]":
-                    break
-
+            buf = b""
+            done = False
+            while not done:
                 try:
-                    chunk = json.loads(data_str)
-                except json.JSONDecodeError:
+                    kind, value = stream_queue.get(timeout=0.2)
+                except queue.Empty:
+                    if should_stop and should_stop():
+                        raise LocalLLMCancelled()
                     continue
-
-                choices = chunk.get("choices") or []
-                if not choices:
+                if kind == "error":
+                    raise value
+                if kind == "eof":
+                    break
+                if kind == "line":
+                    if self._process_sse_line(value, content_parts,
+                                              should_stop, response):
+                        done = True
                     continue
-
-                delta = choices[0].get("delta") or {}
-                # Deliberately only ever read "content" - some models stream
-                # their thinking tokens through a separate "reasoning_content"
-                # field, which we ignore entirely so it never reaches the file.
-                piece = delta.get("content")
-                if piece:
-                    content_parts.append(piece)
-
+                buf += value
+                while b"\n" in buf:
+                    raw_line, buf = buf.split(b"\n", 1)
+                    line = raw_line.decode("utf-8", "replace").rstrip("\r")
+                    if self._process_sse_line(line, content_parts,
+                                              should_stop, response):
+                        done = True
+                        break
             raw_caption = "".join(content_parts)
             final_caption = self._strip_reasoning(raw_caption).strip()
 
             if self.debug_mode:
-                logger.debug(f"Final caption for {os.path.basename(image_path)}: {final_caption}")
+                logger.debug(f"Final caption for {image_path}: {final_caption}")
 
             return final_caption
+        except LocalLLMCancelled:
+            raise
+        except Exception:
+            # A stop from the UI thread closes the socket under us,
+            # which surfaces as a ConnectionError here - report it as
+            # a stop, not as a per-image error.
+            if should_stop and should_stop():
+                raise LocalLLMCancelled()
+            raise
         finally:
             with self._lock:
                 self._active_response = None

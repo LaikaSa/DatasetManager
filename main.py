@@ -44,7 +44,7 @@ def _default_config(tab_definitions):
 def _save_config_file(config, path=CONFIG_FILE):
     try:
         with open(path, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2)
+            json.dump(config, f, indent=2, ensure_ascii=False)
             f.write("\n")
     except OSError as e:
         logger.warning("Could not write config %s: %s", path, e)
@@ -61,28 +61,88 @@ def _legacy_tab_order():
         saved = [saved]
     return saved if isinstance(saved, list) and saved else None
 
+# Legacy standalone caption system-prompt file, kept only for a one-time
+# migration into config.json (key "caption_system_prompt").
+LEGACY_SYSTEM_PROMPT_FILE = (
+    Path(__file__).resolve().parent / "modules" / "caption_generator" / "systemprompt.json"
+)
+SYSTEM_PROMPT_CONFIG_KEY = "caption_system_prompt"
+
+
+def _read_legacy_system_prompt(legacy_path):
+    """Read the legacy systemprompt.json as prompt text. Accepts plain text
+    (the common case, e.g. a Markdown prompt), a bare JSON string, or a JSON
+    object with a 'system_prompt' key. Returns None if unreadable or empty."""
+    try:
+        raw = legacy_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return raw  # plain text (e.g. Markdown)
+    if isinstance(data, str):
+        return data.strip() or None
+    if isinstance(data, dict):
+        value = data.get("system_prompt")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _migrate_system_prompt(config, path=CONFIG_FILE):
+    """One-time migration: move the caption system prompt out of the legacy
+    systemprompt.json into config.json (key "caption_system_prompt"), then
+    remove the legacy file. No-op when the key is already set or there is no
+    legacy file to migrate."""
+    if config.get(SYSTEM_PROMPT_CONFIG_KEY):
+        return config
+    if not LEGACY_SYSTEM_PROMPT_FILE.exists():
+        return config
+    prompt = _read_legacy_system_prompt(LEGACY_SYSTEM_PROMPT_FILE)
+    if not prompt:
+        return config
+    config[SYSTEM_PROMPT_CONFIG_KEY] = prompt
+    _save_config_file(config, path)
+    try:
+        LEGACY_SYSTEM_PROMPT_FILE.unlink()
+        logger.info("Migrated caption system prompt into %s and removed %s",
+                    path, LEGACY_SYSTEM_PROMPT_FILE)
+    except OSError as e:
+        logger.warning("Migrated caption system prompt into %s but could not "
+                       "remove the legacy file %s: %s", path,
+                       LEGACY_SYSTEM_PROMPT_FILE, e)
+    return config
+
 
 def _load_config_file(path=CONFIG_FILE, tab_definitions=None):
     """Load config.json; auto-generate with defaults if missing or unreadable.
 
     When the file is missing, a tab order saved in the old QSettings store
-    is carried over as a one-time migration.
+    is carried over as a one-time migration. A legacy systemprompt.json is
+    likewise migrated into the "caption_system_prompt" key on first run.
     """
+    config = None
     if path.exists():
         try:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
-                return data
-            logger.warning("Config %s is not a JSON object; regenerating", path)
+                config = data
+            else:
+                logger.warning("Config %s is not a JSON object; regenerating", path)
         except (OSError, json.JSONDecodeError) as e:
             logger.warning("Could not read config %s (%s); regenerating", path, e)
-    config = _default_config(tab_definitions)
-    if not path.exists():
-        legacy = _legacy_tab_order()
-        if legacy:
-            config["tab_order"] = legacy  # validated against tab_definitions on use
-    _save_config_file(config, path)
+    if config is None:
+        config = _default_config(tab_definitions)
+        if not path.exists():
+            legacy = _legacy_tab_order()
+            if legacy:
+                config["tab_order"] = legacy  # validated against tab_definitions on use
+        _save_config_file(config, path)
+    _migrate_system_prompt(config, path)
     return config
 
 class MainWindow(QMainWindow):

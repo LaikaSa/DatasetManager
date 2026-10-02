@@ -1,21 +1,19 @@
 import importlib
-import json
 import sys
 import threading
 from PySide6.QtWidgets import (QApplication, QMainWindow, QTabWidget, QMenu,
                               QToolButton, QWidget)
-from PySide6.QtGui import QDragEnterEvent, QDropEvent, QDragMoveEvent, QAction
-from PySide6.QtCore import Qt, QSettings, QTimer
-from modules.logger import setup_logger
+from PySide6.QtGui import QAction
+from PySide6.QtCore import Qt, QTimer
+from modules import config as app_config
 from modules import settings as app_settings
+from modules.logger import setup_logger
 # NOTE: the tab modules are intentionally NOT imported here. They pull in
 # heavy dependencies (torch ~2 s, pandas, onnxruntime, cv2, ...) which used to
 # delay the GUI appearing at startup. Each tab is built lazily on first visit
 # (see _build_tab / _ensure_tab_built), and its module is pre-warmed on a
 # background thread after startup (see _start_prewarm) so the first click
 # doesn't freeze the UI while Python imports the dependencies.
-import os  # Add this for path operations
-from pathlib import Path
 logger = setup_logger()
 
 # tab key -> module path, shared by _build_tab and the pre-warm worker
@@ -28,158 +26,12 @@ TAB_MODULE_PATHS = {
     "conversion": "modules.Conversion_Tools",
 }
 
-# User preferences (tab order, window size) live in config.json at the
-# app root; auto-generated with defaults on first run.
-CONFIG_FILE = Path(__file__).resolve().parent / "config.json"
-DEFAULT_WINDOW_SIZE = [1500, 900]
-
-
-def _default_config(tab_definitions):
-    return {
-        "tab_order": [key for key, _ in tab_definitions],
-        "window_size": list(DEFAULT_WINDOW_SIZE),
-    }
-
-
-def _save_config_file(config, path=CONFIG_FILE, merge=True):
-    """Write config.json. With merge=True (the default), keys owned by other
-    parts of the app (e.g. the caption API key) that are not in the
-    in-memory dict are preserved. With merge=False the dict is written
-    as-is - used by migrations, where the dict is the full image of the
-    file and key deletions must be reflected on disk."""
-    try:
-        merged = {}
-        if merge and path.exists():
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    merged = data
-            except (OSError, json.JSONDecodeError):
-                pass
-        merged.update(config)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(merged, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-    except OSError as e:
-        logger.warning("Could not write config %s: %s", path, e)
-
-
-def _legacy_tab_order():
-    """One-time migration: tab order saved in the old QSettings (registry)
-    store, if any. Returns a list of keys or None."""
-    try:
-        saved = QSettings("DatasetManager", "ImageProcessingTool").value("tab_order", [])
-    except Exception:
-        return None
-    if isinstance(saved, str):  # QSettings may return a single str for a 1-item list
-        saved = [saved]
-    return saved if isinstance(saved, list) and saved else None
-
-# Legacy standalone caption system-prompt file, kept only for a one-time
-# migration into config.json (key "caption_system_prompt_character").
-LEGACY_SYSTEM_PROMPT_FILE = (
-    Path(__file__).resolve().parent / "modules" / "caption_generator" / "systemprompt.json"
-)
-# The caption system prompts live in config.json: one for character
-# training, one for style training; the caption UI picks which is sent.
-# "caption_system_prompt" is the pre-split key, migrated to the character
-# key on first run.
-SYSTEM_PROMPT_CONFIG_KEY = "caption_system_prompt"
-SYSTEM_PROMPT_CONFIG_KEY_CHARACTER = "caption_system_prompt_character"
-SYSTEM_PROMPT_CONFIG_KEY_STYLE = "caption_system_prompt_style"
-
-
-def _read_legacy_system_prompt(legacy_path):
-    """Read the legacy systemprompt.json as prompt text. Accepts plain text
-    (the common case, e.g. a Markdown prompt), a bare JSON string, or a JSON
-    object with a 'system_prompt' key. Returns None if unreadable or empty."""
-    try:
-        raw = legacy_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    if not raw:
-        return None
-    try:
-        data = json.loads(raw)
-    except json.JSONDecodeError:
-        return raw  # plain text (e.g. Markdown)
-    if isinstance(data, str):
-        return data.strip() or None
-    if isinstance(data, dict):
-        value = data.get("system_prompt")
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
-
-
-def _migrate_system_prompts(config, path=CONFIG_FILE):
-    """One-time migration of the caption system prompt into the split
-    config.json keys. The legacy systemprompt.json (or the pre-split
-    "caption_system_prompt" key) is moved to
-    "caption_system_prompt_character", and the pre-split key is removed.
-    The style prompt ("caption_system_prompt_style") is seeded by the
-    caption tab itself, because importing its module is too heavy for the
-    startup path. No-op when everything is already migrated."""
-    changed = False
-    if not config.get(SYSTEM_PROMPT_CONFIG_KEY_CHARACTER):
-        prompt = _read_legacy_system_prompt(LEGACY_SYSTEM_PROMPT_FILE)
-        if prompt:
-            config[SYSTEM_PROMPT_CONFIG_KEY_CHARACTER] = prompt
-            changed = True
-            try:
-                LEGACY_SYSTEM_PROMPT_FILE.unlink()
-                logger.info("Migrated caption system prompt into %s and removed %s",
-                            path, LEGACY_SYSTEM_PROMPT_FILE)
-            except OSError as e:
-                logger.warning("Migrated caption system prompt into %s but could not "
-                               "remove the legacy file %s: %s", path,
-                               LEGACY_SYSTEM_PROMPT_FILE, e)
-    legacy = config.pop(SYSTEM_PROMPT_CONFIG_KEY, None)
-    if legacy and not config.get(SYSTEM_PROMPT_CONFIG_KEY_CHARACTER):
-        config[SYSTEM_PROMPT_CONFIG_KEY_CHARACTER] = legacy
-    if legacy:
-        changed = True  # pre-split key removed (or moved)
-    if changed:
-        _save_config_file(config, path, merge=False)
-    return config
-
-
-def _load_config_file(path=CONFIG_FILE, tab_definitions=None):
-    """Load config.json; auto-generate with defaults if missing or unreadable.
-
-    When the file is missing, a tab order saved in the old QSettings store
-    is carried over as a one-time migration. A legacy systemprompt.json is
-    likewise migrated into the "caption_system_prompt_character" key.
-    """
-    config = None
-    if path.exists():
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                config = data
-            else:
-                logger.warning("Config %s is not a JSON object; regenerating", path)
-        except (OSError, json.JSONDecodeError) as e:
-            logger.warning("Could not read config %s (%s); regenerating", path, e)
-    if config is None:
-        config = _default_config(tab_definitions)
-        if not path.exists():
-            legacy = _legacy_tab_order()
-            if legacy:
-                config["tab_order"] = legacy  # validated against tab_definitions on use
-        _save_config_file(config, path)
-    _migrate_system_prompts(config, path)
-    return config
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         logger.info("Initializing main application")
         self.setWindowTitle("Image Processing Tool")
         self.setMinimumSize(1000, 600)
-        self.setAcceptDrops(True)  # Enable drop for main window
 
         # Create tab widget
         self.tabs = QTabWidget()
@@ -196,11 +48,11 @@ class MainWindow(QMainWindow):
             ("tag_editor", "Tags Editor"),
             ("conversion", "Conversion Tools"),
         ]
-        # User preferences (tab order, window size) live in config.json at
+        # User preferences (tab order, window size) live in config.yaml at
         # the app root; auto-generated with defaults on first run.
-        self.config = _load_config_file(tab_definitions=self.tab_definitions)
+        self.config = app_config.load_config(tab_definitions=self.tab_definitions)
         # The caption API key is owned by the caption UI (it reads and
-        # writes it directly in config.json); keep it out of this cache so
+        # writes it directly in config.yaml); keep it out of this cache so
         # the saves below never resurrect a key the user cleared.
         self.config.pop("llm_api_key", None)
         # Debounced persistence of the window size the user drags it to,
@@ -381,7 +233,7 @@ class MainWindow(QMainWindow):
             if i >= 0:
                 self.tab_keys[i] = key
         self.config["tab_order"] = self.tab_keys
-        _save_config_file(self.config)
+        app_config.save_config(self.config)
 
     def _apply_saved_size(self):
         """Restore the window size the user last set, else the default."""
@@ -390,7 +242,7 @@ class MainWindow(QMainWindow):
                 and all(isinstance(v, int) and v > 0 for v in size)):
             self.resize(size[0], size[1])
         else:
-            self.resize(DEFAULT_WINDOW_SIZE[0], DEFAULT_WINDOW_SIZE[1])
+            self.resize(app_config.DEFAULT_WINDOW_SIZE[0], app_config.DEFAULT_WINDOW_SIZE[1])
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -402,7 +254,7 @@ class MainWindow(QMainWindow):
 
     def _persist_window_size(self):
         self.config["window_size"] = [self.width(), self.height()]
-        _save_config_file(self.config)
+        app_config.save_config(self.config)
 
     def closeEvent(self, event):
         # Save the final size now (the debounce timer may not have fired
@@ -411,72 +263,15 @@ class MainWindow(QMainWindow):
             self._persist_window_size()
         event.accept()
 
-    def _current_tab_accepts_drops(self):
-        # Only the Upscaler tab has a dropEvent, so only show the "can drop"
-        # cursor over it - otherwise drops on other tabs are silently ignored.
-        from modules.Upscaler.upscaler import UpscalerTab
-        return isinstance(self.tabs.currentWidget(), UpscalerTab)
-
-    def dragEnterEvent(self, event: QDragEnterEvent):
-        if event.mimeData().hasUrls() and self._current_tab_accepts_drops():
-            event.accept()
-        else:
-            event.ignore()
-
-    def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls() and self._current_tab_accepts_drops():
-            event.accept()
-        else:
-            event.ignore()
-
-    def dropEvent(self, event: QDropEvent):
-        # Get the current active tab
-        current_tab = self.tabs.currentWidget()
-        
-        # Handle the drop based on the current tab
-        # (deferred import: only reached when a drop actually happens)
-        from modules.Upscaler.upscaler import UpscalerTab
-        if isinstance(current_tab, UpscalerTab):
-            current_subtab = current_tab.tabs.currentWidget()
-            tab_index = current_tab.tabs.currentIndex()
-            
-            if tab_index == 0:  # Single Image tab
-                # Handle single image drop
-                if event.mimeData().hasUrls():
-                    url = event.mimeData().urls()[0]
-                    path = url.toLocalFile()
-                    if os.path.isfile(path) and path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                        current_subtab.input_path.setText(path)
-                        event.accept()
-            elif tab_index == 1:  # Multiple Images tab
-                # Handle multiple images drop
-                files = []
-                for url in event.mimeData().urls():
-                    path = url.toLocalFile()
-                    if os.path.isfile(path) and path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                        files.append(path)
-                    elif os.path.isdir(path):
-                        current_subtab.dir_input.setText(path)
-                        current_subtab.process_directory(path)
-                        event.accept()
-                        return
-                
-                if files:
-                    current_subtab.selected_paths = files
-                    current_subtab.refresh_list()
-                    current_subtab.parent.check_input()
-                    event.accept()
 
 def main():
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())
-
-if __name__ == "__main__":
     logger.info("Starting application")
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
     logger.info("Application started successfully")
     sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

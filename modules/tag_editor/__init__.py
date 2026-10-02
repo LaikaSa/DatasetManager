@@ -44,6 +44,10 @@ class TagEditorTab(QWidget):
 
         top_layout.addWidget(self.path_input)
         top_layout.addWidget(self.browse_btn)
+        self.recursive_cb = QCheckBox("Recursive")
+        self.recursive_cb.setChecked(False)
+        self.recursive_cb.setToolTip("Include images from subfolders")
+        top_layout.addWidget(self.recursive_cb)
         top_layout.addWidget(self.load_btn)
         top_layout.addWidget(self.unload_btn)
         top_layout.addWidget(self.save_btn)
@@ -151,7 +155,8 @@ class TagEditorTab(QWidget):
         self.status_label.setText("Loading...")
 
         # Start loading thread (parallel flag is the app-wide cog setting)
-        self.loading_thread = LoadingThread(folder, app_settings.is_parallel_enabled())
+        self.loading_thread = LoadingThread(folder, app_settings.is_parallel_enabled(),
+                                            self.recursive_cb.isChecked())
         self.loading_thread.progress.connect(self.update_loading_status)
         self.loading_thread.finished.connect(self.on_loading_finished)
         self.loading_thread.start()

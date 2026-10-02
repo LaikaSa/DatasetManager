@@ -4,14 +4,17 @@ from pathlib import Path
 from .parallel_loader import ParallelLoader
 import time
 
+from modules.utils import IMAGE_EXTENSIONS
+
 class LoadingThread(QThread):
     progress = Signal(str)  # For status updates
     finished = Signal(dict)  # For final results
     
-    def __init__(self, directory, use_parallel):
+    def __init__(self, directory, use_parallel, recursive=False):
         super().__init__()
         self.directory = directory
         self.use_parallel = use_parallel
+        self.recursive = recursive
         self.parallel_loader = ParallelLoader()
 
     def run(self):
@@ -21,7 +24,7 @@ class LoadingThread(QThread):
         try:
             if self.use_parallel:
                 self.progress.emit("Using parallel loading...")
-                results = self.parallel_loader.load_images(self.directory)
+                results = self.parallel_loader.load_images(self.directory, self.recursive)
             else:
                 self.progress.emit("Using sequential loading...")
                 results = self.load_sequential()
@@ -48,8 +51,8 @@ class LoadingThread(QThread):
 
     def load_sequential(self):
         results = []
-        valid_extensions = {'.png', '.jpg', '.jpeg', '.bmp'}
-        files = [f for f in Path(self.directory).glob("*.*")
+        valid_extensions = IMAGE_EXTENSIONS
+        files = [f for f in Path(self.directory).glob("**/*.*" if self.recursive else "*.*")
                 if f.suffix.lower() in valid_extensions]
 
         total_files = len(files)

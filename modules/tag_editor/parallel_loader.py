@@ -15,6 +15,8 @@ import numpy as np
 from PIL import Image
 import time  # Add this import
 
+from modules.utils import IMAGE_EXTENSIONS
+
 def process_single_image(args):
     """Process a single image and its tags (runs in worker process)"""
     image_path, thumbnail_size = args
@@ -93,7 +95,7 @@ class ParallelLoader:
         ).copy()
         return QPixmap.fromImage(q_img)
 
-    def load_images(self, directory):
+    def load_images(self, directory, recursive=False):
         """Load images and tags in parallel"""
         try:
             print("\nStarting parallel loading process...")
@@ -101,9 +103,10 @@ class ParallelLoader:
             
             # Get all image files
             file_scan_start = time.time()
-            valid_extensions = {'.png', '.jpg', '.jpeg', '.bmp'}
+            valid_extensions = IMAGE_EXTENSIONS
             image_paths = [
-                str(p) for p in Path(directory).glob('*.*')
+                str(p) for p in (Path(directory).rglob('*.*') if recursive
+                                 else Path(directory).glob('*.*'))
                 if p.suffix.lower() in valid_extensions
             ]
             file_scan_end = time.time()

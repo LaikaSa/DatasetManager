@@ -2,11 +2,9 @@ from PySide6.QtCore import QThread, Signal
 import numpy as np
 import os
 import threading
-import torch
-from PIL import Image
 from .utils import ProgressBar
-from .data_loader import ImageLoadingPrepDataset, collate_fn_remove_corrupted
 from modules.logger import setup_logger
+from modules.utils import IMAGE_EXTENSIONS
 logger = setup_logger()
 
 class CaptionGeneratorThread(QThread):
@@ -176,12 +174,12 @@ class CaptionGeneratorThread(QThread):
             # Walk through directory and subdirectories
             for root, _, files in os.walk(folder_path):
                 for file in files:
-                    if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
+                    if file.lower().endswith(IMAGE_EXTENSIONS):
                         image_files.append(os.path.join(root, file))
         else:
             # Only get files from the main directory
             image_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path)
                          if os.path.isfile(os.path.join(folder_path, f)) and
-                         f.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp'))]
+                         f.lower().endswith(IMAGE_EXTENSIONS)]
         return image_files
 

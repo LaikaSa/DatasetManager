@@ -217,5 +217,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
-# App config (per-user tab order, window size)
-config.json
+# App config (per-user tab order, window size, caption prompts, API key)
+config.yaml

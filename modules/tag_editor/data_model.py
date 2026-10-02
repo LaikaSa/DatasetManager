@@ -2,10 +2,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Set, Dict, List, Tuple, Union
 from PySide6.QtGui import QPixmap
-from PySide6.QtCore import Qt
 from collections import Counter
-from .parallel_loader import ParallelLoader
-import time
 
 @dataclass
 class ImageData:
@@ -19,7 +16,6 @@ class DataModel:
         self.images: Dict[str, ImageData] = {}
         self.tag_frequencies = Counter()
         self.modified_files: Set[str] = set()
-        self.parallel_loader = ParallelLoader()
 
     def filter_images(self, tags: Set[str], combine_logic: str = "AND",
                      filter_logic: str = "POSITIVE") -> List[ImageData]:
@@ -47,97 +43,6 @@ class DataModel:
 
         print(f"Found {len(matching_images)} matching images with {filter_logic} logic")
         return matching_images
-
-    def load_directory(self, directory: str, use_parallel: bool = False) -> None:
-        print(f"\nStarting directory load: {directory}")
-        print(f"Using parallel loading: {use_parallel}")
-        
-        start_time = time.time()
-        self.clear()
-
-        if use_parallel:
-            # Use parallel loading
-            parallel_start = time.time()
-            results = self.parallel_loader.load_images(directory)
-            parallel_end = time.time()
-            print(f"Parallel processing time: {parallel_end - parallel_start:.2f} seconds")
-
-            # Process results
-            process_start = time.time()
-            for result in results:
-                image_path = result['path']
-                self.images[image_path] = ImageData(
-                    image_path,
-                    result['tags'],
-                    result['thumbnail']
-                )
-                self.tag_frequencies.update(result['tags'])
-            process_end = time.time()
-            print(f"Results processing time: {process_end - process_start:.2f} seconds")
-
-        else:
-            # Sequential loading
-            files = list(Path(directory).glob("*.*"))
-            total_files = len([f for f in files 
-                             if f.suffix.lower() in {'.png', '.jpg', '.jpeg', '.bmp'}])
-            print(f"Found {total_files} image files")
-
-            processed = 0
-            sequential_start = time.time()
-            
-            for file_path in files:
-                if file_path.suffix.lower() in {'.png', '.jpg', '.jpeg', '.bmp'}:
-                    image_path = str(file_path)
-                    tag_path = file_path.with_suffix('.txt')
-                    
-                    # Load tags (preserve order, drop duplicates)
-                    tags = []
-                    if tag_path.exists():
-                        try:
-                            with open(tag_path, 'r', encoding='utf-8') as f:
-                                seen = set()
-                                for tag in f.read().split(','):
-                                    tag = tag.strip().lower()
-                                    if tag and tag not in seen:
-                                        seen.add(tag)
-                                        tags.append(tag)
-                        except Exception as e:
-                            print(f"Error loading tags for {image_path}: {e}")
-
-                    # Create thumbnail
-                    try:
-                        thumbnail = QPixmap(image_path)
-                        thumbnail = thumbnail.scaled(
-                            150, 150,
-                            Qt.AspectRatioMode.KeepAspectRatio,
-                            Qt.TransformationMode.SmoothTransformation
-                        )
-                        
-                        # Store image data
-                        self.images[image_path] = ImageData(
-                            image_path,
-                            tags,
-                            thumbnail
-                        )
-                        self.tag_frequencies.update(tags)
-                        
-                        processed += 1
-                        if processed % 100 == 0:  # Progress update every 100 images
-                            print(f"Processed {processed}/{total_files} images...")
-                    except Exception as e:
-                        print(f"Error loading image {image_path}: {e}")
-
-            sequential_end = time.time()
-            print(f"Sequential processing time: {sequential_end - sequential_start:.2f} seconds")
-
-        end_time = time.time()
-        total_time = end_time - start_time
-        
-        print("\nLoading Summary:")
-        print(f"Total time: {total_time:.2f} seconds")
-        print(f"Images loaded: {len(self.images)}")
-        print(f"Unique tags: {len(self.tag_frequencies)}")
-        print(f"Average time per image: {(total_time / len(self.images) if self.images else 0):.3f} seconds")
 
     def remove_tags(self, tags_to_remove: Set[str]) -> None:
         print(f"Removing tags: {tags_to_remove}")

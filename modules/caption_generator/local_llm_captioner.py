@@ -6,7 +6,7 @@ koboldcpp, Ollama's OpenAI-compat endpoint, etc.).
 
 Design notes (see the conversation this was built from for the full spec):
 - A system prompt IS sent with every request, overriding any system prompt
-  configured on the server. It is read from config.json at the app root,
+  configured on the server. It is read from config.yaml at the app root,
   from the key matching the training type chosen in the UI
   ("caption_system_prompt_character" or "caption_system_prompt_style",
   edited by the user themselves). If that key is missing or empty, a
@@ -43,111 +43,24 @@ import queue
 import re
 import socket
 import threading
-from pathlib import Path
 
 import requests
 from PIL import Image
 from PySide6.QtCore import QThread, Signal
 
+from modules import config as app_config
 from modules.logger import setup_logger
+from modules.utils import IMAGE_EXTENSIONS
 
 logger = setup_logger()
 
-IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp')
-
-# The user-editable system prompts live in config.json at the app root,
-# alongside tab_order and window_size. The app root is two levels up from
-# this module (modules/caption_generator/). Two prompts are selectable in
-# the UI: one for character training, one for style training.
-CONFIG_FILE = Path(__file__).resolve().parents[2] / "config.json"
-SYSTEM_PROMPT_CONFIG_KEY_CHARACTER = "caption_system_prompt_character"
-SYSTEM_PROMPT_CONFIG_KEY_STYLE = "caption_system_prompt_style"
-API_KEY_CONFIG_KEY = "llm_api_key"
-
-# Fallback system prompt for character training, used only when config.json
-# has no usable "caption_system_prompt_character". It tells the model to
-# write a plain caption and to avoid grounding/detection output (box_2d /
-# bbox_2d / JSON / tag lists), which is the failure mode this whole feature
-# was added to prevent.
-DEFAULT_SYSTEM_PROMPT = (
-    "You write natural-language captions for a Stable Diffusion anime "
-    "training set. You are given an image, and sometimes a list of existing "
-    "tags for reference. Describe the image in one or two clear, natural "
-    "English sentences. If tags are provided, let them inform your "
-    "description but write it as flowing prose. Output ONLY the caption "
-    "text. Do NOT output JSON, bounding boxes, 'box_2d', 'bbox_2d', "
-    "coordinates, markdown, or a list of tags."
-)
-
-# Built-in style-training prompt, written to config.json (key
-# "caption_system_prompt_style") on first run; the user can then edit it
-# there like the character prompt.
-DEFAULT_STYLE_SYSTEM_PROMPT = """# System Prompt: Danbooru-Grounded Natural Language Captioner
-
-You are an image captioning assistant used to prepare training captions for a LoRA/diffusion dataset. You will be shown an image, and optionally a list of Danbooru-style tags describing it. Your job is to produce a single natural-language paragraph that describes the image, written the way a careful human would describe it to someone who cannot see it.
-
-## Inputs you may receive
-- **Image only** — derive tags yourself from what you see, using Danbooru tag vocabulary/conventions as your mental checklist (subject count, pose, expression, hair, eyes, clothing, accessories, background, framing, art style).
-- **Image + tag list** — treat the tags as ground truth for *what* is present. Do not contradict them, drop them, or invent conflicting attributes. Your job is to render the tags into fluent prose and append the visual detail the tags don't capture.
-
-## Core rules
-
-1. **Tags are the wording of the output, not vocabulary to be translated.** Wherever a tag names an attribute, reuse the tag's own wording with only the minimal grammatical glue needed for fluent English (articles, hyphens, tense, expanding `1girl` to "a woman/girl", "viewed" before angle tags). Do not paraphrase, upgrade, synonymize, or "improve" tag words:
-   - `dark skinned` → "dark-skinned" — never "black skin", "dark complexion", "tanned".
-   - `blonde hair` → "blonde hair" — never "golden hair", "strawberry blonde", "light hair".
-   - `from below` → "viewed from below" — never "low angle", "worm's-eye view", "from underneath".
-   - `yellow eyes` → "yellow eyes" — never "gold eyes", "amber eyes".
-   - `smile` → "a smile" — never "a soft, confident grin" (you may append visible expression detail after it, see rule 2, but the tag word itself must remain).
-   Danbooru terms that already read as fluent English (`hair between eyes`, `looking at viewer`, `ahoge`, `cowboy shot`, `spread legs`) should be kept verbatim with at most the smallest glue ("looking at the viewer").
-
-2. **Append model vision only where the tags are silent.** For every attribute the tags specify, the tag wording is the base; your own observations are *appended* to that phrase or clause, never woven in by replacing the tag's words. Add what you actually see that the tags don't state: hair texture/length/sheen (only if the length isn't already tagged), lighting, shading, gradients, material impressions, background detail, art style, etc. If the tags say `blonde hair` and you see it is straight and glossy, write "blonde hair, straight with a glossy sheen" — not "silky golden hair". If a tag is generic — `uniform`, `scar`, `dress`, `armor`, `jewelry` — it tells you *that* something exists, and your eyes must supply *what it looks like*: cut, color, material impression, trim, insignia, closures, silhouette, condition (pristine/worn/torn), how it drapes, etc. Keep the tag word in place and expand around it ("a military uniform: a fitted white coat with a high collar and a row of gold clasps"), don't replace it (not "a crisp white officer's coat" with no word "uniform"). This is the most important part of your job — but appended, not substituted.
-
-3. **Don't hallucinate identity or lore.** Describe only what is visually present. Do not name a character, series, or real person even if you recognize the design — describe the design itself (hair color, outfit details, symbols, colors) instead. Do not invent a narrative, backstory, or emotional state beyond what's visible (e.g. don't say "she is mourning" — say "her expression is soft, with a faint smile").
-
-4. **Preserve tag-level facts precisely:**
-   - Counts (`1girl`, `2girls`) → number and gender of subjects.
-   - Gaze/composition (`looking at viewer`, `from below`, `cowboy shot`, `close-up`) → use the tag's own framing wording ("looking at the viewer", "viewed from below", "a cowboy shot").
-   - Colors on eyes/hair/clothing given in tags are authoritative; don't swap them for a prettier synonym — but do append shading/highlight/gradient detail you can see, after the base tag color.
-   - Pose and expression tags (`smile`, `parted lips`, `hand on hip`) → keep the tag wording as the core and append physical detail ("a smile with parted lips"), never replace the term.
-
-5. **Group by category — don't interleave.** Each sentence or clause should stay within one category before moving to the next; don't hop between a physical trait, then an action, then back to a trait. Cover categories in this order, finishing one before starting the next:
-   - **Framing / composition** (when tagged or clearly visible) — angle and shot type in the tag's wording, e.g. "She is viewed from below in a cowboy shot." A short framing clause may also open the first subject sentence, e.g. "Viewed from below, a dark-skinned woman with blonde hair…"
-   - **Physical traits** — eye color/shape, hair color/length/style, skin marks, body build, face shape. All static, inherent attributes of the subject go here together, e.g. "She has yellow eyes and long white hair."
-   - **Pose / action / expression** — what she is doing and how she presents: gaze direction, expression, hand/body position (camera angle already covered under framing). e.g. "She looks at the viewer with a faint smile, raising one hand in a peace sign."
-   - **Outfit** — clothing from top to bottom in one pass, with material/trim/color/construction detail, e.g. "She wears a black military uniform: a short-sleeved shirt with a wide collar and a pleated white skirt."
-   - **Accessories / held or nearby items** — jewelry, weapons, props, anything worn or carried that isn't clothing.
-   - **Background / setting / lighting** — environment, atmosphere, art style if relevant.
-   Do not scatter a trait, then an action, then a trait, then clothing, then another trait — each category is said once, as a block, before moving on. Traits belonging to the same category should be merged into shared sentences rather than each getting its own separate sentence (e.g. eye color and hair color together, not two standalone sentences).
-
-6. **Length and tone:** One dense, well-organized paragraph. Neutral, descriptive, precise — like an art cataloguer, not a fan review. No praise language ("beautiful", "stunning"), no speculation about mood/story beyond visible expression, no meta-commentary about the image being AI-generated or about tags.
-
-7. **Explicit/NSFW content — describe plainly and precisely.** This is a technical captioning task, not creative writing, and the dataset may include adult content. Do not soften, euphemize, fade to suggestion, or omit nudity, sex acts, genitals, fluids, or other explicit anatomical/sexual detail that is visibly present. Use the same clinical, exact vocabulary Danbooru NSFW tags use (e.g. `nipples`, `pussy`, `penis`, `sex`, `cum`, `spread legs`, `penetration`, `fellatio`, `loli`) as your baseline terms — kept verbatim per rule 1 — then append the same kind of visible detail as any other tag: position, visible detail, what's touching what, expression, etc. Treat explicit anatomy with the same descriptive rigor as clothing or hair, not with more caution or less.
-
-8. **If tags and image conflict**, gently prioritize the image for the appended physical detail, but keep the tag's wording and core claim (e.g. tag says `scar` and image shows a burn-like mark — describe it as "a scar, reddish and burn-looking", don't drop it or call it something else entirely like "birthmark").
-
-9. **Do not include:** the original tag list, comma-separated tag fragments, watermark/artist signature text, meta tags (`highres`, `absurdres`, `commentary`, `signature`), or any disclaimers.
-
-10. **Do not ignore any tags:** every tag given must be taken into consideration and turned into natural language that fits the image; do not take it upon yourself to remove any.
-
-## Output format
-Return ONLY the final descriptive paragraph. No preamble, no headers, no "Here is the description:" lines. Use straight quotes/hyphens/apostrophes instead of smart/curly Unicode variants, and the whole output must be one unbroken block with no line breaks or newlines at all.
-
-## Examples
-
-**Input tags:** `1girl, from below, dark skinned female, blonde hair`
-
-**Output:**
-Viewed from below, a dark-skinned woman with blonde hair, straight and falling past her shoulders. She is looking at the viewer with a faint smile, her expression relaxed. The background is a soft out-of-focus gray.
-
-**Input tags:** `1girl, solo, long hair, looking at viewer, smile, hair between eyes, yellow eyes, white hair, scar, military uniform`
-
-**Output:**
-She has yellow eyes and long white hair, with loose strands of hair between her eyes framing her face. A scar spreads across her right cheek, reddish and burn-looking, with smaller marks near her temple. She is looking at the viewer with a smile. She wears a white military uniform: a fitted coat with a high collar, closed by a row of gold clasps down the center and trimmed in gold braid along the seams and hem, with a gold epaulette with a thick fringe on her left shoulder and a royal blue cape lined in gold hanging from beneath it. A small gold star pin is fastened to her chest. The background is a pale blue sky with soft, wispy clouds, lit evenly in warm daylight.
-
----
-
-*Notes for the operator:* if the tag list is very long or includes rating/meta tags (`rating:safe`, `absurdres`, artist name tags), ignore those categories — they don't describe visual content. If no tags are provided, silently build your own working tag list from the image first, then write the paragraph from that, following all rules above.
-"""
+# The user-editable system prompts live in config.yaml at the app root,
+# alongside tab_order, window_size and llm_api_key. Two prompts are
+# selectable in the UI: one for character training, one for style
+# training. The built-in defaults (app_config.DEFAULT_SYSTEM_PROMPT /
+# app_config.DEFAULT_STYLE_SYSTEM_PROMPT) are written into config.yaml
+# when the file is first generated, and used as a runtime fallback when a
+# key is missing or empty.
 
 # Strips <think>...</think>, <thinking>...</thinking>, <reasoning>...</reasoning>,
 # and <reflection>...</reflection> blocks some local reasoning models emit
@@ -175,66 +88,6 @@ def _extract_system_prompt(data):
     return None
 
 
-def load_api_key():
-    """API key persisted in config.json on a previous run, or ""."""
-    try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            config = json.load(f)
-    except (OSError, json.JSONDecodeError):
-        return ""
-    if not isinstance(config, dict):
-        return ""
-    key = config.get(API_KEY_CONFIG_KEY)
-    return key if isinstance(key, str) else ""
-
-
-def save_api_key(api_key):
-    """Persist the API key to config.json (or remove it when empty),
-    merging with the existing content so the keys owned by main.py
-    (tab_order, window_size, caption_system_prompt_*) are preserved."""
-    try:
-        config = {}
-        if CONFIG_FILE.exists():
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                config = data
-        if api_key:
-            config[API_KEY_CONFIG_KEY] = api_key
-        else:
-            config.pop(API_KEY_CONFIG_KEY, None)
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning("Could not save API key to %s: %s", CONFIG_FILE, e)
-
-
-def ensure_style_prompt_in_config():
-    """Seed config.json with the built-in style prompt (key
-    "caption_system_prompt_style") when the user has not set one yet, so
-    both training prompts are editable in config.json. Called when the
-    caption tab is built (importing this module's package is too heavy for
-    main.py's startup path). No-op when the key already has a value."""
-    try:
-        config = {}
-        if CONFIG_FILE.exists():
-            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                config = data
-        existing = config.get(SYSTEM_PROMPT_CONFIG_KEY_STYLE)
-        if isinstance(existing, str) and existing.strip():
-            return
-        config[SYSTEM_PROMPT_CONFIG_KEY_STYLE] = DEFAULT_STYLE_SYSTEM_PROMPT
-        with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=2, ensure_ascii=False)
-            f.write("\n")
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning("Could not seed style system prompt in %s: %s",
-                       CONFIG_FILE, e)
-
-
 class LocalLLMCancelled(Exception):
     """Raised internally when a caption request is stopped by the user."""
     pass
@@ -245,17 +98,17 @@ class LocalLLMCaptioner:
     an image (plus optional existing tags) into a natural-language caption."""
 
     def __init__(self, base_url, api_key="", debug_mode=False, request_timeout=300,
-                 system_prompt_key=SYSTEM_PROMPT_CONFIG_KEY_CHARACTER):
+                 system_prompt_key=app_config.SYSTEM_PROMPT_CONFIG_KEY_CHARACTER):
         self.base_url = (base_url or "").rstrip('/')
         self.api_key = (api_key or "").strip()
         self.debug_mode = debug_mode
         self.request_timeout = request_timeout
-        # Which config.json key holds the system prompt for this captioner
+        # Which config.yaml key holds the system prompt for this captioner
         # (character vs style training, chosen in the UI).
         self.system_prompt_key = system_prompt_key
         self._active_response = None
         self._lock = threading.Lock()
-        # (config-signature, prompt) so we re-read config.json only when it
+        # (config-signature, prompt) so we re-read config.yaml only when it
         # changes, and re-emit the "falling back" warning only once.
         self._system_prompt_cache = None
         # Kept only so UI code that checks `captioner.session` (a WD-tagger
@@ -290,16 +143,16 @@ class LocalLLMCaptioner:
         return f"data:image/jpeg;base64,{encoded}"
 
     def _load_system_prompt(self):
-        """Read the user's system prompt from config.json at the app root
+        """Read the user's system prompt from config.yaml at the app root
         (the key chosen at construction: "caption_system_prompt_character"
         or "caption_system_prompt_style"). It is sent with every request and
         overrides any system prompt set on the server. Falls back to the
         built-in default for that training type when the key is missing or
-        empty, and re-reads automatically when config.json changes, so edits
+        empty, and re-reads automatically when config.yaml changes, so edits
         take effect without a restart. (Legacy prompts are migrated into
-        config.json by main.py on first run.)"""
+        config.yaml by modules.config on first run.)"""
         try:
-            signature = ("mtime", os.path.getmtime(CONFIG_FILE))
+            signature = ("mtime", os.path.getmtime(app_config.CONFIG_FILE))
         except OSError:
             signature = ("missing", None)
 
@@ -309,31 +162,22 @@ class LocalLLMCaptioner:
 
         prompt = None
         if signature[0] != "missing":
-            try:
-                with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                if isinstance(config, dict):
-                    value = config.get(self.system_prompt_key)
-                    if isinstance(value, str) and value.strip():
-                        prompt = value.strip()
-            except (OSError, json.JSONDecodeError) as e:
-                logger.warning(
-                    "Could not read system prompt from %s (%s) - using the built-in default.",
-                    CONFIG_FILE, e,
-                )
+            value = app_config.get_value(self.system_prompt_key)
+            if isinstance(value, str) and value.strip():
+                prompt = value.strip()
 
         if not prompt:
-            prompt = (DEFAULT_STYLE_SYSTEM_PROMPT
-                      if self.system_prompt_key == SYSTEM_PROMPT_CONFIG_KEY_STYLE
-                      else DEFAULT_SYSTEM_PROMPT)
+            prompt = (app_config.DEFAULT_STYLE_SYSTEM_PROMPT
+                      if self.system_prompt_key == app_config.SYSTEM_PROMPT_CONFIG_KEY_STYLE
+                      else app_config.DEFAULT_SYSTEM_PROMPT)
             logger.warning(
                 "No system prompt in %s (key %r) - using the built-in default.",
-                CONFIG_FILE, self.system_prompt_key,
+                app_config.CONFIG_FILE, self.system_prompt_key,
             )
 
         self._system_prompt_cache = (signature, prompt)
         if self.debug_mode:
-            logger.debug("Using system prompt from %s", CONFIG_FILE)
+            logger.debug("Using system prompt from %s", app_config.CONFIG_FILE)
         return prompt
 
     def _build_messages(self, image_path, tags_text):

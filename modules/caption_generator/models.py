@@ -179,57 +179,12 @@ class ImageCaptioner:
         label_name = self.session.get_outputs()[0].name
         stacked = np.concatenate([np.asarray(im, dtype=np.float32) for im in images], axis=0)
         return self.session.run([label_name], {self.input_name: stacked})[0]
-            
-    def generate_caption(self, image_path, 
-                        general_threshold=0.35, 
-                        character_threshold=0.85,
-                        thresh=0.35,
-                        remove_underscore=True,
-                        undesired_tags=None,
-                        always_first_tags=None,
-                        caption_separator=", ",
-                        include_rating=False):
-        try:
-            # 1. Initial Setup and Logging
-            if self.debug_mode:  # Use debug_mode instead of debug_cb
-                logger.debug(f"Generating caption for {os.path.basename(image_path)}")
-                logger.debug("Parameters:")
-                logger.debug(f"  General threshold: {general_threshold}")
-                logger.debug(f"  Character threshold: {character_threshold}")
-                logger.debug(f"  Overall threshold: {thresh}")
-                logger.debug(f"  Include rating: {include_rating}")
-                logger.debug(f"  Remove underscore: {remove_underscore}")
-            
-            # Set thresholds
-            general_threshold = general_threshold if general_threshold != thresh else thresh
-            character_threshold = character_threshold if character_threshold != thresh else thresh
-            
-            # 2. Image Preparation
-            if isinstance(image_path, str):
-                image = self.prepare_image(image_path)
-            else:
-                image = image_path
-
-            # 3. Model Inference
-            label_name = self.session.get_outputs()[0].name
-            preds = self.session.run([label_name], {self.input_name: image})[0]
-            return self.caption_from_preds(preds[0].astype(float),
-                                           general_threshold, character_threshold,
-                                           remove_underscore, undesired_tags,
-                                           always_first_tags, caption_separator,
-                                           include_rating)
-
-        except Exception as e:
-            error_msg = f"Error generating caption for {image_path}: {e}"
-            logger.error(error_msg)  # Errors always logged regardless of debug mode
-            return None
 
     def caption_from_preds(self, logit_row, general_threshold, character_threshold,
                            remove_underscore, undesired_tags, always_first_tags,
                            caption_separator, include_rating):
         """Turn one raw logit row (from a single or batched inference) into a
-        caption string. Shared by generate_caption() and the batched loop in
-        processing.py."""
+        caption string. Used by the batched loop in processing.py."""
         try:
             labels = list(zip(self.tag_names, logit_row))
 

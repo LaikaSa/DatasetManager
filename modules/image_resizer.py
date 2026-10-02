@@ -1,30 +1,39 @@
 import os
 from PIL import Image
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
-                              QFileDialog, QProgressBar, QHBoxLayout, 
-                              QSpinBox, QLineEdit, QTextEdit)
+                              QFileDialog, QProgressBar, QHBoxLayout,
+                              QSpinBox, QLineEdit, QTextEdit, QCheckBox)
 from PySide6.QtCore import Qt, QThread, Signal
+
+from modules.utils import IMAGE_EXTENSIONS
 
 class ResizeWorker(QThread):
     progress = Signal(int)
     status = Signal(str)
     finished = Signal()
 
-    def __init__(self, folder_path, max_resolution):
+    def __init__(self, folder_path, max_resolution, recursive=False):
         super().__init__()
         self.folder_path = folder_path
         self.max_resolution = max_resolution
+        self.recursive = recursive
         self.is_running = True
 
     def run(self):
         image_files = []
-        for root, dirs, files in os.walk(self.folder_path):
-            # Never descend into our own output folders (a re-run with a lower
-            # max resolution would otherwise nest resized/resized/...)
-            dirs[:] = [d for d in dirs if d != 'resized']
-            for file in files:
-                if file.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp')):
-                    image_files.append(os.path.join(root, file))
+        if self.recursive:
+            for root, dirs, files in os.walk(self.folder_path):
+                # Never descend into our own output folders (a re-run with a
+                # lower max resolution would otherwise nest resized/resized/...)
+                dirs[:] = [d for d in dirs if d != 'resized']
+                for file in files:
+                    if file.lower().endswith(IMAGE_EXTENSIONS):
+                        image_files.append(os.path.join(root, file))
+        else:
+            for file in os.listdir(self.folder_path):
+                full = os.path.join(self.folder_path, file)
+                if os.path.isfile(full) and file.lower().endswith(IMAGE_EXTENSIONS):
+                    image_files.append(full)
 
         total_files = len(image_files)
         processed = 0
@@ -92,6 +101,9 @@ class ImageResizerTab(QWidget):
         self.browse_btn = QPushButton("Browse")
         folder_layout.addWidget(self.path_input)
         folder_layout.addWidget(self.browse_btn)
+        self.recursive_cb = QCheckBox("Recursive")
+        self.recursive_cb.setToolTip("Include images from subfolders")
+        folder_layout.addWidget(self.recursive_cb)
         folder_layout.addStretch()
 
         # Status label
@@ -171,7 +183,8 @@ class ImageResizerTab(QWidget):
         folder_path = self.path_input.text().strip()
         max_resolution = self.resolution_spin.value()
 
-        self.worker = ResizeWorker(folder_path, max_resolution)
+        self.worker = ResizeWorker(folder_path, max_resolution,
+                                   self.recursive_cb.isChecked())
         self.worker.progress.connect(self.progress_bar.setValue)
         self.worker.status.connect(self.update_status)
         self.worker.finished.connect(self.resize_finished)
@@ -180,6 +193,7 @@ class ImageResizerTab(QWidget):
         self.stop_btn.setEnabled(True)
         self.browse_btn.setEnabled(False)
         self.path_input.setEnabled(False)
+        self.recursive_cb.setEnabled(False)
         self.status_text.clear()
         
         self.worker.start()
@@ -187,8 +201,8 @@ class ImageResizerTab(QWidget):
     def stop_resize(self):
         if self.worker and self.worker.isRunning():
             self.worker.stop()
-            self.worker.wait()
-            self.resize_finished()
+            # Non-blocking: the worker's loop notices the flag and emits
+            # finished, which runs resize_finished() on the GUI thread.
 
     def update_status(self, text):
         self.status_text.append(text)
@@ -198,3 +212,4 @@ class ImageResizerTab(QWidget):
         self.stop_btn.setEnabled(False)
         self.browse_btn.setEnabled(True)
         self.path_input.setEnabled(True)
+        self.recursive_cb.setEnabled(True)

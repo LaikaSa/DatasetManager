@@ -1,15 +1,13 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel, 
                               QFileDialog, QTextEdit, QMessageBox, QCheckBox,
                               QLineEdit, QComboBox, QHBoxLayout, QSlider,
-                              QSpinBox)
-from PySide6.QtCore import Qt, QThread, Signal, QTimer
+                              QSpinBox, QDialog, QPlainTextEdit, QToolButton)
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QPointF
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from .models import ImageCaptioner
 from .processing import CaptionGeneratorThread
-from .local_llm_captioner import (LocalLLMCaptioner, NaturalLanguageCaptionThread,
-                                  SYSTEM_PROMPT_CONFIG_KEY_CHARACTER,
-                                  SYSTEM_PROMPT_CONFIG_KEY_STYLE,
-                                  ensure_style_prompt_in_config,
-                                  load_api_key, save_api_key)
+from .local_llm_captioner import (LocalLLMCaptioner, NaturalLanguageCaptionThread)
+from modules import config as app_config
 import os
 import functools
 import multiprocessing
@@ -79,6 +77,63 @@ class TagModelDownloadThread(QThread):
             self.finished_ok.emit(False)
 
 
+def _create_pen_icon(logical_size=16):
+    """Paint a small pen icon (2x supersampled; no asset files needed)."""
+    s = 2
+    size = logical_size * s
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    ink = QColor(70, 70, 70)
+    # pen body
+    painter.setPen(QPen(ink, 3 * s, Qt.SolidLine, Qt.RoundCap))
+    painter.drawLine(6 * s, (logical_size - 6) * s, (logical_size - 4) * s, 4 * s)
+    # nib
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(ink)
+    painter.drawPolygon(QPolygonF([
+        QPointF(2 * s, (logical_size - 2) * s),
+        QPointF(8 * s, (logical_size - 8) * s),
+        QPointF(5 * s, (logical_size - 3) * s),
+    ]))
+    painter.end()
+    pixmap.setDevicePixelRatio(s)
+    return QIcon(pixmap)
+
+
+class SystemPromptEditorDialog(QDialog):
+    """Edit the system prompt sent to the LLM. The prompt is stored as a
+    plain multi-line string in config.yaml; the editor shows it verbatim in
+    a monospace font. Long lines wrap at the frame edge so the whole
+    prompt stays visible (indentation and line breaks are preserved)."""
+
+    def __init__(self, title, text, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(1140, 780)
+        layout = QVBoxLayout(self)
+        self.editor = QPlainTextEdit()
+        font = QFont("Consolas")
+        font.setStyleHint(QFont.Monospace)
+        self.editor.setFont(font)
+        self.editor.setLineWrapMode(QPlainTextEdit.WidgetWidth)
+        self.editor.setPlainText(text)
+        layout.addWidget(self.editor)
+        buttons = QHBoxLayout()
+        buttons.addStretch()
+        save_btn = QPushButton("Save")
+        cancel_btn = QPushButton("Cancel")
+        save_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+        buttons.addWidget(save_btn)
+        buttons.addWidget(cancel_btn)
+        layout.addLayout(buttons)
+
+    def text(self):
+        return self.editor.toPlainText()
+
+
 class CaptionGeneratorTab(QWidget):
     def __init__(self):
         super().__init__()
@@ -99,9 +154,6 @@ class CaptionGeneratorTab(QWidget):
             print(f"Error setting up default model: {str(e)}")
 
     def init_ui(self):
-        # Make sure the style-training prompt exists in config.json so both
-        # prompts are user-editable there (no-op when already set).
-        ensure_style_prompt_in_config()
         layout = QVBoxLayout()
         
         # 1. Folder Selection Section
@@ -133,19 +185,32 @@ class CaptionGeneratorTab(QWidget):
         self.download_btn.clicked.connect(self.download_model)
         self.download_btn.hide()
 
-        # Training type: selects which system prompt from config.json is
+        # Training type: selects which system prompt from config.yaml is
         # sent to the LLM (character vs style training). Only relevant in
         # "Natural Language" mode, so hidden otherwise.
         self.training_type_combo = QComboBox()
         self.training_type_combo.addItems([TRAIN_CHARACTER_OPTION, TRAIN_STYLE_OPTION])
         self.training_type_combo.setToolTip(
             "Which system prompt to send to the LLM (both are editable in "
-            "config.json):\n"
+            "config.yaml, or via the pen button next to this dropdown):\n"
             f"{TRAIN_CHARACTER_OPTION} - describe the character, for character LoRA training.\n"
             f"{TRAIN_STYLE_OPTION} - describe the art style, for style LoRA training."
         )
         self.training_type_combo.hide()
         self.training_type_combo.currentIndexChanged.connect(self.on_training_type_changed)
+
+        # Pen button: opens the system-prompt editor for the selected
+        # training type. Only relevant in "Natural Language" mode.
+        self.prompt_edit_btn = QToolButton()
+        self.prompt_edit_btn.setIcon(_create_pen_icon())
+        self.prompt_edit_btn.setToolTip(
+            "Edit the system prompt sent to the LLM for the selected "
+            "training type.\n"
+            "Changes are saved to config.yaml and take effect on the next "
+            "caption run."
+        )
+        self.prompt_edit_btn.hide()
+        self.prompt_edit_btn.clicked.connect(self._edit_system_prompt)
 
         # Local LLM base URL - only shown when "Natural Language" is selected
         self.llm_url_input = QLineEdit()
@@ -161,21 +226,22 @@ class CaptionGeneratorTab(QWidget):
         # API key for servers that require authentication - only shown when
         # "Natural Language" is selected
         self.llm_api_key_input = QLineEdit()
-        self.llm_api_key_input.setPlaceholderText("API key (save to config.json)")
+        self.llm_api_key_input.setPlaceholderText("API key (save to config.yaml)")
         self.llm_api_key_input.setEchoMode(QLineEdit.Password)
         self.llm_api_key_input.setToolTip(
             "API key sent as 'Authorization: Bearer <key>' with every request.\n"
-            "Saved to config.json and restored on the next launch.\n"
+            "Saved to config.yaml and restored on the next launch.\n"
             "Leave empty for open local servers that accept all traffic."
         )
         self.llm_api_key_input.hide()
         self.llm_api_key_input.editingFinished.connect(self.on_llm_settings_changed)
-        # Restore the API key saved on a previous run (config.json).
-        self.llm_api_key_input.setText(load_api_key())
+        # Restore the API key saved on a previous run (config.yaml).
+        self.llm_api_key_input.setText(app_config.load_api_key())
 
         model_layout.addWidget(model_label)
         model_layout.addWidget(self.model_combo)
         model_layout.addWidget(self.training_type_combo)
+        model_layout.addWidget(self.prompt_edit_btn)
         model_layout.addWidget(self.download_btn)
         model_layout.addWidget(self.llm_url_input)
         model_layout.addWidget(self.llm_api_key_input)
@@ -398,6 +464,7 @@ class CaptionGeneratorTab(QWidget):
                 self.llm_url_input.show()
                 self.llm_api_key_input.show()
                 self.training_type_combo.show()
+                self.prompt_edit_btn.show()
                 self.nl_prefix_container.show()
                 self.wd_options_container.hide()
                 # The (lightweight) LLM captioner is rebuilt with the current
@@ -408,6 +475,7 @@ class CaptionGeneratorTab(QWidget):
             self.llm_url_input.hide()
             self.llm_api_key_input.hide()
             self.training_type_combo.hide()
+            self.prompt_edit_btn.hide()
             self.nl_prefix_container.hide()
             self.wd_options_container.show()
             
@@ -435,14 +503,48 @@ class CaptionGeneratorTab(QWidget):
         if self.is_natural_language_mode():
             self.captioner = None
 
+    def _current_prompt_key(self):
+        """config.yaml key for the system prompt of the selected training
+        type."""
+        return (app_config.SYSTEM_PROMPT_CONFIG_KEY_STYLE
+                if self.training_type_combo.currentText() == TRAIN_STYLE_OPTION
+                else app_config.SYSTEM_PROMPT_CONFIG_KEY_CHARACTER)
+
+    def _edit_system_prompt(self):
+        """Open the system-prompt editor for the selected training type.
+        On save, persist the text to config.yaml and drop the cached
+        captioner so the next run uses the new prompt."""
+        key = self._current_prompt_key()
+        default = (app_config.DEFAULT_STYLE_SYSTEM_PROMPT
+                   if key == app_config.SYSTEM_PROMPT_CONFIG_KEY_STYLE
+                   else app_config.DEFAULT_SYSTEM_PROMPT)
+        stored = app_config.get_value(key)
+        current = stored if (isinstance(stored, str) and stored.strip()) else default
+        title = f"System prompt - {self.training_type_combo.currentText()}"
+        dialog = SystemPromptEditorDialog(title, current, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        new_text = dialog.text()
+        # Compare against what is on disk, not the fallback: when the key
+        # was missing, saving the displayed default must persist it.
+        if new_text == stored:
+            return
+        app_config.set_value(key, new_text)
+        self.captioner = None
+        self.status_text.append(
+            f"System prompt ({self.training_type_combo.currentText()}) "
+            f"saved to config.yaml"
+        )
+        logger.info("System prompt updated for key %s", key)
+
     def on_llm_settings_changed(self):
         """Invalidate the cached captioner when the URL or API key field is
-        edited, and persist the API key to config.json so it is restored on
+        edited, and persist the API key to config.yaml so it is restored on
         the next launch. A fresh captioner with the new settings is built
         on the next "Generate Captions" click."""
         if self.is_natural_language_mode():
             self.captioner = None
-        save_api_key(self.llm_api_key_input.text().strip())
+        app_config.save_api_key(self.llm_api_key_input.text().strip())
 
     def download_model(self):
         """Download the selected model into the shared HuggingFace cache
@@ -515,9 +617,7 @@ class CaptionGeneratorTab(QWidget):
             if model_name == NATURAL_LANGUAGE_OPTION:
                 base_url = self.llm_url_input.text().strip() or DEFAULT_LOCAL_LLM_URL
                 api_key = self.llm_api_key_input.text().strip()
-                prompt_key = (SYSTEM_PROMPT_CONFIG_KEY_STYLE
-                              if self.training_type_combo.currentText() == TRAIN_STYLE_OPTION
-                              else SYSTEM_PROMPT_CONFIG_KEY_CHARACTER)
+                prompt_key = self._current_prompt_key()
                 self.captioner = LocalLLMCaptioner(
                     base_url,
                     api_key=api_key,

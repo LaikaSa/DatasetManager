@@ -19,6 +19,7 @@ Reference implementation:
 
 import os
 import math
+import random
 import datetime
 
 # Reduce CUDA memory fragmentation ("reserved but unallocated") - must be set
@@ -40,6 +41,11 @@ logger = setup_logger()
 SEEDVR2_HF_REPO = "numz/SeedVR2_comfyUI"
 SEEDVR2_DIT_MODEL = "seedvr2_ema_3b_fp16.safetensors"
 SEEDVR2_VAE_MODEL = "ema_vae_fp16.safetensors"
+# Cache keys for the vendored code's process-wide GlobalModelCache - the
+# DiT + VAE are stored there for the life of the process unless removed
+# explicitly (see clear_gpu_memory).
+SEEDVR2_DIT_CACHE_ID = "seedvr2_dit"
+SEEDVR2_VAE_CACHE_ID = "seedvr2_vae"
 
 
 def _hf_try_cache(repo_id, filename):
@@ -146,7 +152,11 @@ class _SilentDebug:
 
 
 class SeedVR2UpscaleWorker(QThread):
-    """QThread that upscales a list of images with SeedVR2 (single-frame mode)."""
+    """QThread that upscales a list of images with SeedVR2 (single-frame mode).
+
+    seed: a fixed value (>=0) applies to every image; -1 draws a fresh random
+    seed per image (ComfyUI-style randomize).
+    """
 
     progress = Signal(int)
     status = Signal(str)
@@ -206,8 +216,8 @@ class SeedVR2UpscaleWorker(QThread):
             ctx=self.ctx,
             dit_cache=True,
             vae_cache=True,
-            dit_id="seedvr2_dit",
-            vae_id="seedvr2_vae",
+            dit_id=SEEDVR2_DIT_CACHE_ID,
+            vae_id=SEEDVR2_VAE_CACHE_ID,
             block_swap_config=None,
             encode_tiled=self.tile_vae,
             encode_tile_size=(512, 512),
@@ -228,6 +238,7 @@ class SeedVR2UpscaleWorker(QThread):
 
     def clear_gpu_memory(self):
         from modules.Upscaler.seedvr2.src.optimization.memory_manager import complete_cleanup
+        from modules.Upscaler.seedvr2.src.core.model_cache import get_global_cache
 
         if self.runner is not None:
             try:
@@ -237,6 +248,16 @@ class SeedVR2UpscaleWorker(QThread):
                 logger.warning("SeedVR2 cleanup: %s", e)
             self.runner = None
         self.ctx = None
+        # complete_cleanup only drops the runner's OWN references. The
+        # vendored code also keeps DiT + VAE in a process-wide singleton
+        # (GlobalModelCache) - left alone, the ~6GB DiT + VAE stay in VRAM
+        # until the app exits. Remove our entries so VRAM is fully freed.
+        try:
+            cache = get_global_cache()
+            cache.remove_dit({"node_id": SEEDVR2_DIT_CACHE_ID}, debug=self.debug)
+            cache.remove_vae({"node_id": SEEDVR2_VAE_CACHE_ID}, debug=self.debug)
+        except Exception as e:
+            logger.warning("SeedVR2 cache cleanup: %s", e)
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
@@ -247,7 +268,19 @@ class SeedVR2UpscaleWorker(QThread):
         frames = torch.from_numpy(arr[None, ...])  # [1, H, W, C] in [0, 1]
         return frames, (img.height, img.width)
 
-    def _process_one(self, img_path):
+    def _resolve_seed(self):
+        """Per-image seed: self.seed when fixed, uniform random when self.seed == -1.
+
+        Mirrors ComfyUI's randomize (uniform draw; its frontend caps at
+        2**53-1 only because of JS float precision). We cap at 2**32-1:
+        numpy's legacy seed() rejects more - same max the vendored node
+        widget uses.
+        """
+        if self.seed >= 0:
+            return self.seed
+        return random.randint(0, 2**32 - 1)
+
+    def _process_one(self, img_path, seed):
         from modules.Upscaler.seedvr2.src.core.generation_phases import (
             encode_all_batches,
             upscale_all_batches,
@@ -277,12 +310,12 @@ class SeedVR2UpscaleWorker(QThread):
         self.ctx["video_transform"] = None
         self.ctx.pop("true_target_dims", None)
 
-        torch.manual_seed(self.seed)
-        np.random.seed(self.seed)
+        torch.manual_seed(seed)
+        np.random.seed(seed)
 
         self.ctx = encode_all_batches(
             self.runner, ctx=self.ctx, images=frames, debug=self.debug,
-            batch_size=1, uniform_batch_size=False, seed=self.seed,
+            batch_size=1, uniform_batch_size=False, seed=seed,
             progress_callback=None, temporal_overlap=0,
             resolution=resolution, max_resolution=0,
             input_noise_scale=0.0, color_correction=self.color_correction,
@@ -291,7 +324,7 @@ class SeedVR2UpscaleWorker(QThread):
         # batch reuses them (otherwise the VAE is freed after each image).
         self.ctx = upscale_all_batches(
             self.runner, ctx=self.ctx, debug=self.debug, progress_callback=None,
-            seed=self.seed, latent_noise_scale=0.0, cache_model=True,
+            seed=seed, latent_noise_scale=0.0, cache_model=True,
         )
         self.ctx = decode_all_batches(
             self.runner, ctx=self.ctx, debug=self.debug,
@@ -338,7 +371,10 @@ class SeedVR2UpscaleWorker(QThread):
                 self.status.emit(f"Upscaling [{idx}/{total}]: {os.path.basename(img_path)}")
                 logger.info("SeedVR2 processing: %s", os.path.basename(img_path))
                 try:
-                    out_img = self._process_one(img_path)
+                    seed = self._resolve_seed()
+                    if self.seed == -1:
+                        self.status.emit(f"Seed: {seed}")
+                    out_img = self._process_one(img_path, seed)
                     self._save(img_path, out_img)
                 except Exception as e:
                     self.status.emit(f"Error processing {img_path}: {e}")
@@ -358,7 +394,10 @@ class SeedVR2UpscaleWorker(QThread):
             self.status.emit(f"Error: {e}")
             logger.exception("SeedVR2 run failed")
         finally:
+            # Free DiT + VAE + CUDA cache once the WHOLE batch is done
+            # (or stopped) - never per image.
             self.clear_gpu_memory()
+            self.status.emit("GPU memory freed")
             self.finished.emit()
 
     def stop(self):

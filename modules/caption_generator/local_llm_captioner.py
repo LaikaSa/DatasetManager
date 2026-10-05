@@ -119,6 +119,13 @@ class LocalLLMCaptioner:
     def endpoint(self):
         return f"{self.base_url}/v1/chat/completions"
 
+    def release(self):
+        """No-op: the model lives on the external LLM server, not in this
+        process (the user manages that server's VRAM). Returns False so
+        the UI doesn't claim VRAM was freed.
+        """
+        return False
+
     # Vision models downscale inputs internally, so sending full-resolution
     # images mostly inflates the base64 payload and slows every request.
     # Capping the longest edge keeps quality while shrinking it a lot.

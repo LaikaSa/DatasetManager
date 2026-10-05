@@ -388,8 +388,8 @@ class CaptionGeneratorTab(QWidget):
         layout.addWidget(self.nl_prefix_container)
         layout.addLayout(debug_layout)
         layout.addWidget(self.wd_options_container)
-        layout.addWidget(self.status_text)
         layout.addLayout(process_layout)
+        layout.addWidget(self.status_text)
         
         self.setLayout(layout)
         
@@ -834,14 +834,29 @@ class CaptionGeneratorTab(QWidget):
         else:
             self.status_text.append(f"Generated caption for {os.path.basename(image_path)}")
 
+    def _release_captioner(self):
+        """Free the caption model's VRAM once a run has ended (completed,
+        stopped, or errored). The captioner is rebuilt on the next
+        "Generate Captions" click, so this only costs a model reload next
+        time - in exchange the GPU is free for other work.
+        """
+        if self.captioner is None:
+            return
+        freed = self.captioner.release()
+        self.captioner = None
+        if freed:
+            self.status_text.append("Caption model unloaded (VRAM freed)")
+
     def process_completed(self):
         self.set_controls_enabled(True)
+        self._release_captioner()
         completion_msg = "Caption generation completed!"
         self.status_text.append(completion_msg)
         logger.info(completion_msg)
 
     def process_stopped(self):
         self.set_controls_enabled(True)
+        self._release_captioner()
         stopped_msg = "Caption generation stopped by user."
         self.status_text.append(stopped_msg)
         logger.info(stopped_msg)
@@ -849,3 +864,4 @@ class CaptionGeneratorTab(QWidget):
     def handle_error(self, error_message):
         self.status_text.append(f"Error: {error_message}")
         logger.error(error_message)
+        self._release_captioner()

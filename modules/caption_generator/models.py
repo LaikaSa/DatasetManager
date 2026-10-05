@@ -1,3 +1,4 @@
+import gc
 import onnxruntime
 import numpy as np
 import os
@@ -166,6 +167,20 @@ class ImageCaptioner:
             except Exception as fallback_e:
                 print(f"Fallback also failed: {fallback_e}")
                 return None
+
+    def release(self):
+        """Free the ONNX session (and its GPU arena) after a run.
+
+        onnxruntime has no explicit close(); dropping the last reference
+        destroys the C++ session and returns the CUDA arena to the driver.
+        The captioner is rebuilt on the next "Generate Captions" click.
+        Returns True when a session was actually freed.
+        """
+        if self.session is not None:
+            self.session = None
+            gc.collect()
+            return True
+        return False
 
     def predict_batch(self, images):
         """Run one batched inference over a list of prepared image arrays.

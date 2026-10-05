@@ -129,10 +129,9 @@ class UpscaleWorker(QThread):
     progress = Signal(int)
     status = Signal(str)
     finished = Signal()
-    model_loaded = Signal(object)  # lets the tab cache the model between runs
 
     def __init__(self, input_paths, model_path, scale_factor, device=None,
-                 model=None, owns_model=True, min_size=0):
+                 min_size=0):
         super().__init__()
         self.input_paths = input_paths if isinstance(input_paths, list) else [input_paths]
         self.model_path = model_path
@@ -143,8 +142,7 @@ class UpscaleWorker(QThread):
             self.device = device
         else:
             self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        self.model = model  # preloaded (tab-cached) model, if any
-        self.owns_model = owns_model  # False when the tab keeps the model
+        self.model = None
         self.tile_size = 512
         self.tile_pad = 32
 
@@ -163,34 +161,32 @@ class UpscaleWorker(QThread):
         return self.scale_factor
 
     def load_model(self):
-        if self.model is None:
-            state_dict = torch.load(self.model_path, map_location=self.device)
-            if 'params_ema' in state_dict:
-                state_dict = state_dict['params_ema']
+        state_dict = torch.load(self.model_path, map_location=self.device)
+        if 'params_ema' in state_dict:
+            state_dict = state_dict['params_ema']
 
-            # Count the number of RRDB blocks
-            block_count = 0
-            for key in state_dict.keys():
-                if key.startswith('body.'):
-                    parts = key.split('.')
-                    if len(parts) > 2 and parts[1].isdigit():
-                        block_num = int(parts[1])
-                        block_count = max(block_count, block_num + 1)
+        # Count the number of RRDB blocks
+        block_count = 0
+        for key in state_dict.keys():
+            if key.startswith('body.'):
+                parts = key.split('.')
+                if len(parts) > 2 and parts[1].isdigit():
+                    block_num = int(parts[1])
+                    block_count = max(block_count, block_num + 1)
 
-            self.status.emit(f"Detected {block_count} blocks in model")
-            
-            model = RRDBNet(
-                num_in_ch=3,
-                num_out_ch=3,
-                num_feat=64,
-                num_block=block_count,
-                num_grow_ch=32
-            )
-            
-            model.load_state_dict(state_dict)
-            model.eval()
-            self.model = model.to(self.device)
-            self.model_loaded.emit(self.model)
+        self.status.emit(f"Detected {block_count} blocks in model")
+
+        model = RRDBNet(
+            num_in_ch=3,
+            num_out_ch=3,
+            num_feat=64,
+            num_block=block_count,
+            num_grow_ch=32
+        )
+
+        model.load_state_dict(state_dict)
+        model.eval()
+        self.model = model.to(self.device)
         return self.model
 
     def process_tile(self, tile, scale):
@@ -357,16 +353,22 @@ class UpscaleWorker(QThread):
             error_msg = f"Error: {str(e)}"
             logger.error(error_msg)
             self.status.emit(error_msg)
-        
+        finally:
+            # Free the model + CUDA cache once the WHOLE batch is done
+            # (or stopped) - never per image - so VRAM is returned as soon
+            # as the operation ends.
+            self.clear_gpu_memory()
+            self.status.emit("GPU memory freed")
+
         self.finished.emit()
 
     def stop(self):
         self.is_running = False
 
     def clear_gpu_memory(self):
-        # Only free the model when this worker owns it; tab-cached models
-        # are kept so the next run doesn't pay the load cost again.
-        if self.owns_model and self.model is not None:
+        """Free the model and the CUDA cache. Called once per run, after
+        the whole batch finishes (or is stopped)."""
+        if self.model is not None:
             del self.model
             self.model = None
             if torch.cuda.is_available():

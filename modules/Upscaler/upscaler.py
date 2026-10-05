@@ -29,10 +29,6 @@ class UpscalerTab(QWidget):
         super().__init__()
         logger.info("Initializing Upscaler Tab")
         self.worker = None
-        # Cached RealESRGAN model so repeated runs skip torch.load + device
-        # transfer. Keyed by (model_path, device).
-        self._cached_model = None
-        self._cached_model_key = None
         self.init_ui()
 
     def init_ui(self):
@@ -96,8 +92,14 @@ class UpscalerTab(QWidget):
         seedvr2_layout.setContentsMargins(0, 0, 0, 0)
         seedvr2_layout.addWidget(QLabel("Seed:"))
         self.seed_spin = QSpinBox()
-        self.seed_spin.setRange(0, 2**31 - 1)
-        self.seed_spin.setValue(42)
+        # -1 = fresh random seed per image (ComfyUI-style randomize)
+        self.seed_spin.setRange(-1, 2**31 - 1)
+        self.seed_spin.setToolTip(
+            "-1 (default) draws a fresh random seed per image; each drawn\n"
+            "seed is reported in the status log for reproducibility.\n"
+            "Any other value is a fixed seed applied to every image."
+        )
+        self.seed_spin.setValue(-1)
         seedvr2_layout.addWidget(self.seed_spin)
 
         seedvr2_layout.addSpacing(20)
@@ -278,21 +280,14 @@ class UpscalerTab(QWidget):
                 tile_vae=self.tile_cb.isChecked(),
                 min_size=min_size,
             )
-            # SeedVR2 has no model_loaded signal to defer the start -
-            # connect + launch immediately.
+            # SeedVR2 loads its models inside run() - connect + launch
+            # immediately.
             self._activate_worker()
         else:
-            # Reuse the cached model when model + device is unchanged
-            cache_key = (self.model_path, device)
-            if self._cached_model_key != cache_key:
-                self._clear_cached_model()
-            use_cached = self._cached_model_key == cache_key
             self.worker = UpscaleWorker(
                 input_paths, self.model_path, self.scale_spin.value(),
-                device=device, model=self._cached_model,
-                owns_model=not use_cached, min_size=min_size,
+                device=device, min_size=min_size,
             )
-            self.worker.model_loaded.connect(self._on_model_loaded)
 
     def _activate_worker(self):
         """Connect the worker's signals, lock the UI and start the thread."""
@@ -310,28 +305,13 @@ class UpscalerTab(QWidget):
         self.status_text.setText("")
         self.worker.start()
 
-    def _clear_cached_model(self):
-        if self._cached_model is not None:
-            del self._cached_model
-            self._cached_model = None
-            self._cached_model_key = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-
-    def _on_model_loaded(self, model):
-        """Cache a freshly loaded model for the next run."""
-        device = settings.to_torch_device(settings.get_selected_device_id())
-        self._cached_model = model
-        self._cached_model_key = (self.model_path, device)
-
-        self._activate_worker()
-
     def stop_upscale(self):
         """Ask the worker to stop; its own finished signal runs
-        upscale_finished() (non-blocking - no wait() on the GUI thread)."""
+        upscale_finished() (non-blocking - no wait() on the GUI thread).
+        The worker frees the model + GPU memory in its own finally once
+        the batch ends."""
         if self.worker and self.worker.isRunning():
             self.worker.stop()
-            self.worker.clear_gpu_memory()
 
     def upscale_finished(self):
         self.start_btn.setEnabled(True)

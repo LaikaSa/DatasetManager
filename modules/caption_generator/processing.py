@@ -1,11 +1,18 @@
-from PySide6.QtCore import QThread, Signal
-import numpy as np
-import os
+"""Qt shells over the pure engine (engine.run). All processing logic lives
+in engine.py; these QThread classes only translate params to a plain-data
+dict, bridge engine callbacks back to Qt signals, and keep the GUI-side
+progress-bar print. Constructors and signals are unchanged for the UI."""
+
 import threading
+
+from PySide6.QtCore import QThread, Signal
+
+from . import engine
 from .utils import ProgressBar
 from modules.logger import setup_logger
-from modules.utils import IMAGE_EXTENSIONS
+
 logger = setup_logger()
+
 
 class CaptionGeneratorThread(QThread):
     caption_generated = Signal(str, str)
@@ -13,8 +20,8 @@ class CaptionGeneratorThread(QThread):
     error_occurred = Signal(str)
     stopped = Signal()
 
-    def __init__(self, captioner, folder_path, include_rating=False, 
-                 remove_underscore=True, recursive=False, 
+    def __init__(self, captioner, folder_path, include_rating=False,
+                 remove_underscore=True, recursive=False,
                  undesired_tags=None, prefix_tags=None, append_tags=False,
                  thresh=0.35, general_threshold=0.35, character_threshold=0.35,
                  batch_size=1, worker_count=2):
@@ -40,146 +47,91 @@ class CaptionGeneratorThread(QThread):
     def _should_stop(self):
         return self._stop_event.is_set()
 
-    def _prepare_image(self, image_path):
-        """Decode + preprocess one image (thread-safe, no Qt objects)."""
+    def run(self):
         try:
-            return self.captioner.prepare_image(image_path)
-        except Exception as e:
-            logger.error(f"Could not prepare {image_path}: {e}")
-            return None
+            state = {"bar": None}
 
-    def _apply_append(self, image_path, txt_path, caption):
-        """Append mode: merge new tags into the existing caption file
-        (existing tags first, de-duplicated)."""
-        if not self.append_tags or not os.path.exists(txt_path):
-            return caption
+            def progress(current, total, message=""):
+                # The bar is printed GUI-side (print_progress_bar convention);
+                # the engine only reports counts.
+                if state["bar"] is None:
+                    state["bar"] = ProgressBar(total, prefix='Processing: ')
+                state["bar"].update(current)
+
+            summary = engine.run(
+                {
+                    "mode": engine.MODE_TAGGER,
+                    "folder": self.folder_path,
+                    "recursive": self.recursive,
+                    "captioner": self.captioner,
+                    "include_rating": self.include_rating,
+                    "remove_underscore": self.remove_underscore,
+                    "undesired_tags": self.undesired_tags,
+                    "prefix_tags": self.prefix_tags,
+                    "append_tags": self.append_tags,
+                    "thresh": self.thresh,
+                    "general_threshold": self.general_threshold,
+                    "character_threshold": self.character_threshold,
+                    "batch_size": self.batch_size,
+                    "worker_count": self.worker_count,
+                    "on_caption": lambda path, caption: self.caption_generated.emit(path, caption),
+                    "on_error": lambda message: self.error_occurred.emit(message),
+                },
+                progress_cb=progress,
+                stop_check=self._should_stop,
+            )
+            if summary.get("stopped"):
+                self.stopped.emit()
+            else:
+                self.process_completed.emit()
+        except Exception as e:
+            self.error_occurred.emit(f"Process error: {str(e)}")
+
+
+class NaturalLanguageCaptionThread(QThread):
+    caption_generated = Signal(str, str)
+    process_completed = Signal()
+    error_occurred = Signal(str)
+    stopped = Signal()
+
+    def __init__(self, captioner, folder_path, recursive=False, caption_prefix=""):
+        super().__init__()
+        self.captioner = captioner
+        self.folder_path = folder_path
+        self.recursive = recursive
+        self.caption_prefix = caption_prefix
+        self._stop_event = threading.Event()
+
+    def request_stop(self):
+        self._stop_event.set()
+        # Abort an in-flight streaming request right away, not at the next
+        # image boundary (LocalLLMCaptioner closes the HTTP connection).
         try:
-            with open(txt_path, 'r', encoding='utf-8') as f:
-                existing_content = f.read().strip()
+            self.captioner.stop_current_request()
+        except Exception:
+            pass
 
-            existing_tags = [tag.strip() for tag in existing_content.split(',') if tag.strip()]
-            new_tags = [tag.strip() for tag in caption.split(',') if tag.strip()]
-
-            if self.captioner.debug_mode:
-                logger.debug(f"\nAppending tags for {os.path.basename(image_path)}:")
-                logger.debug(f"  Existing tags: {existing_tags}")
-                logger.debug(f"  New tags: {new_tags}")
-
-            combined_tags = []
-            seen = set()
-            for tag in existing_tags + new_tags:
-                if tag not in seen:
-                    combined_tags.append(tag)
-                    seen.add(tag)
-
-            if self.captioner.debug_mode:
-                logger.debug(f"  Final combined tags: {combined_tags}")
-
-            return ', '.join(combined_tags)
-
-        except Exception as e:
-            logger.error(f"Error reading existing caption for {image_path}: {e}")
-            return caption
+    def _should_stop(self):
+        return self._stop_event.is_set()
 
     def run(self):
         try:
-            image_files = self.get_image_files(self.folder_path)
-            total_files = len(image_files)
-
-            # Basic info always shown
-            logger.info(f"Starting caption generation for {len(image_files)} images")
-            progress = ProgressBar(total_files, prefix='Processing: ')
-
-            from concurrent.futures import ThreadPoolExecutor
-            prep_workers = max(1, self.worker_count)
-            batch_size = max(1, self.batch_size)
-
-            completed = 0
-            for batch_start in range(0, total_files, batch_size):
-                if self._should_stop():
-                    logger.info("Caption generation stopped by user")
-                    self.stopped.emit()
-                    return
-
-                batch_paths = image_files[batch_start: batch_start + batch_size]
-
-                try:
-                    # Prepare images in parallel - decoding is the I/O-bound
-                    # part, and the data-loader worker count is finally used
-                    # for something.
-                    if len(batch_paths) == 1:
-                        prepared = [self._prepare_image(batch_paths[0])]
-                    else:
-                        with ThreadPoolExecutor(max_workers=min(prep_workers, len(batch_paths))) as pool:
-                            prepared = list(pool.map(self._prepare_image, batch_paths))
-
-                    ok_idx = [i for i, im in enumerate(prepared) if im is not None]
-
-                    # One batched inference for every prepared image in the batch
-                    preds = None
-                    if ok_idx:
-                        preds = self.captioner.predict_batch([prepared[i] for i in ok_idx])
-
-                    for j, i in enumerate(ok_idx):
-                        image_path = batch_paths[i]
-
-                        caption = self.captioner.caption_from_preds(
-                            np.asarray(preds[j], dtype=float),
-                            self.general_threshold,
-                            self.character_threshold,
-                            self.remove_underscore,
-                            self.undesired_tags,
-                            self.prefix_tags,
-                            ", ",
-                            self.include_rating,
-                        )
-
-                        # Log generated tags only in debug mode
-                        if self.captioner.debug_mode and caption is not None:
-                            logger.debug(f"\nGenerated caption for {os.path.basename(image_path)}:")
-                            logger.debug(f"  Tags: {caption.split(', ')}")
-
-                        # A None caption means inference failed for this image
-                        # - skip the write so we never store an error string.
-                        if caption is None:
-                            self.error_occurred.emit(f"Caption generation failed for {image_path}")
-                        else:
-                            txt_path = os.path.splitext(image_path)[0] + '.txt'
-                            caption = self._apply_append(image_path, txt_path, caption)
-                            with open(txt_path, 'w', encoding='utf-8') as f:
-                                f.write(caption + '\n')
-                            self.caption_generated.emit(image_path, caption)
-
-                        completed += 1
-                        progress.update(completed)
-
-                except Exception as e:
-                    logger.error(f"Error processing batch starting at {batch_paths[0]}: {str(e)}")
-                    self.error_occurred.emit(f"Error processing batch: {str(e)}")
-                    completed += len(batch_paths)
-
-            # Basic completion info always shown
-            logger.info("Caption generation completed")
-            self.process_completed.emit()
-
+            summary = engine.run(
+                {
+                    "mode": engine.MODE_NATURAL_LANGUAGE,
+                    "folder": self.folder_path,
+                    "recursive": self.recursive,
+                    "captioner": self.captioner,
+                    "caption_prefix": self.caption_prefix,
+                    "on_caption": lambda path, caption: self.caption_generated.emit(path, caption),
+                    "on_error": lambda message: self.error_occurred.emit(message),
+                },
+                progress_cb=None,
+                stop_check=self._should_stop,
+            )
+            if summary.get("stopped"):
+                self.stopped.emit()
+            else:
+                self.process_completed.emit()
         except Exception as e:
-            error_msg = f"Process error: {str(e)}"
-            logger.error(error_msg)
-            self.error_occurred.emit(error_msg)
-
-
-    def get_image_files(self, folder_path):
-        image_files = []
-        if self.recursive:
-            # Walk through directory and subdirectories
-            for root, _, files in os.walk(folder_path):
-                for file in files:
-                    if file.lower().endswith(IMAGE_EXTENSIONS):
-                        image_files.append(os.path.join(root, file))
-        else:
-            # Only get files from the main directory
-            image_files = [os.path.join(folder_path, f) for f in os.listdir(folder_path)
-                         if os.path.isfile(os.path.join(folder_path, f)) and
-                         f.lower().endswith(IMAGE_EXTENSIONS)]
-        return image_files
-
+            self.error_occurred.emit(f"Process error: {str(e)}")

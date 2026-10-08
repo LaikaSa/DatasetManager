@@ -1,18 +1,19 @@
+import sys
+
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, 
                              QPushButton, QCheckBox, QComboBox, QLabel, 
                              QFileDialog, QTabWidget)
 from PySide6.QtCore import Qt, QThread, Signal
 from .. import settings as app_settings
-from .converter import ImageConverter, IccProfileFixer
+from . import engine
 from .extension_manager import ExtensionManagerTab
 
 class ConversionWorker(QThread):
     finished = Signal()
     error = Signal(str)
     
-    def __init__(self, converter, folder_path, target_format, recursive, use_parallel):
+    def __init__(self, folder_path, target_format, recursive, use_parallel):
         super().__init__()
-        self.converter = converter
         self.folder_path = folder_path
         self.target_format = target_format
         self.recursive = recursive
@@ -21,13 +22,23 @@ class ConversionWorker(QThread):
 
     def run(self):
         try:
-            self.converter.convert_folder(
-                self.folder_path, 
-                self.target_format, 
-                self.recursive,
-                self.use_parallel,
-                lambda: not self.is_running
+            summary = engine.run(
+                {
+                    "operation": "convert",
+                    "folder_path": self.folder_path,
+                    "target_format": self.target_format,
+                    "recursive": self.recursive,
+                    "use_parallel": self.use_parallel,
+                },
+                progress_cb=self.print_progress_bar,
+                stop_check=lambda: not self.is_running,
             )
+            if summary["total"] == 0:
+                print("No files to convert")
+            else:
+                if summary["stopped"]:
+                    print("\nConversion stopped by user")
+                print()  # New line after progress bar completes
             if self.is_running:
                 self.finished.emit()
         except Exception as e:
@@ -36,13 +47,20 @@ class ConversionWorker(QThread):
     def stop(self):
         self.is_running = False
 
+    def print_progress_bar(self, current, total, bar_length=50):
+        """Print a progress bar to the terminal."""
+        progress = float(current) / total
+        filled_length = int(bar_length * progress)
+        bar = '=' * filled_length + '-' * (bar_length - filled_length)
+        sys.stdout.write(f'\r[{bar}] {current}/{total}')
+        sys.stdout.flush()
+
 class IccFixWorker(QThread):
     finished = Signal(dict)
     error = Signal(str)
 
-    def __init__(self, fixer, folder_path, recursive, backup, dry_run):
+    def __init__(self, folder_path, recursive, backup, dry_run):
         super().__init__()
-        self.fixer = fixer
         self.folder_path = folder_path
         self.recursive = recursive
         self.backup = backup
@@ -51,26 +69,43 @@ class IccFixWorker(QThread):
 
     def run(self):
         try:
-            counts = self.fixer.fix_folder(
-                self.folder_path,
-                self.recursive,
-                self.backup,
-                self.dry_run,
-                lambda: not self.is_running
+            summary = engine.run(
+                {
+                    "operation": "icc_fix",
+                    "folder_path": self.folder_path,
+                    "recursive": self.recursive,
+                    "backup": self.backup,
+                    "dry_run": self.dry_run,
+                },
+                progress_cb=self.print_progress_bar,
+                stop_check=lambda: not self.is_running,
             )
+            if summary["total"] == 0:
+                print("No image files found")
+            else:
+                print()  # New line after progress bar completes
             if self.is_running:
-                self.finished.emit(counts)
+                self.finished.emit(
+                    {"fixed": summary["processed"], "skipped": summary["skipped"],
+                     "errors": summary["errors"]}
+                )
         except Exception as e:
             self.error.emit(str(e))
 
     def stop(self):
         self.is_running = False
 
+    def print_progress_bar(self, current, total, bar_length=50):
+        """Print a progress bar to the terminal."""
+        progress = float(current) / total
+        filled_length = int(bar_length * progress)
+        bar = '=' * filled_length + '-' * (bar_length - filled_length)
+        sys.stdout.write(f'\r[{bar}] {current}/{total}')
+        sys.stdout.flush()
+
 class ConversionTab(QWidget):
     def __init__(self):
         super().__init__()
-        self.converter = ImageConverter()
-        self.icc_fixer = IccProfileFixer()
         self.worker = None
         self.init_ui()
 
@@ -201,7 +236,6 @@ class ConversionTab(QWidget):
 
         # Create and start worker thread with parallel processing option
         self.worker = ConversionWorker(
-            self.converter, 
             folder_path, 
             target_format, 
             recursive,
@@ -231,7 +265,6 @@ class ConversionTab(QWidget):
         )
 
         self.worker = IccFixWorker(
-            self.icc_fixer,
             folder_path,
             recursive,
             backup,

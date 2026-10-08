@@ -5,8 +5,8 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
 from PySide6.QtCore import Qt, QThread, Signal, QTimer, QPointF
 from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap, QPolygonF
 from .models import ImageCaptioner
-from .processing import CaptionGeneratorThread
-from .local_llm_captioner import (LocalLLMCaptioner, NaturalLanguageCaptionThread)
+from .processing import CaptionGeneratorThread, NaturalLanguageCaptionThread
+from .local_llm_captioner import LocalLLMCaptioner
 from modules import config as app_config
 import os
 import functools

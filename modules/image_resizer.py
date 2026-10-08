@@ -1,11 +1,10 @@
 import os
-from PIL import Image
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
                               QFileDialog, QProgressBar, QHBoxLayout,
                               QSpinBox, QLineEdit, QTextEdit, QCheckBox)
 from PySide6.QtCore import Qt, QThread, Signal
 
-from modules.utils import IMAGE_EXTENSIONS
+from modules import image_resizer_engine
 
 class ResizeWorker(QThread):
     progress = Signal(int)
@@ -20,65 +19,20 @@ class ResizeWorker(QThread):
         self.is_running = True
 
     def run(self):
-        image_files = []
-        if self.recursive:
-            for root, dirs, files in os.walk(self.folder_path):
-                # Never descend into our own output folders (a re-run with a
-                # lower max resolution would otherwise nest resized/resized/...)
-                dirs[:] = [d for d in dirs if d != 'resized']
-                for file in files:
-                    if file.lower().endswith(IMAGE_EXTENSIONS):
-                        image_files.append(os.path.join(root, file))
-        else:
-            for file in os.listdir(self.folder_path):
-                full = os.path.join(self.folder_path, file)
-                if os.path.isfile(full) and file.lower().endswith(IMAGE_EXTENSIONS):
-                    image_files.append(full)
-
-        total_files = len(image_files)
-        processed = 0
-        resized = 0
-
-        for idx, img_path in enumerate(image_files):
-            if not self.is_running:
-                break
-
-            try:
-                with Image.open(img_path) as img:
-                    width, height = img.size
-                    needs_resize = width > self.max_resolution or height > self.max_resolution
-
-                    if needs_resize:
-                        # Calculate new dimensions
-                        ratio = min(self.max_resolution / width, self.max_resolution / height)
-                        new_width = int(width * ratio)
-                        new_height = int(height * ratio)
-
-                        # Create resized subfolder if it doesn't exist
-                        output_dir = os.path.join(os.path.dirname(img_path), 'resized')
-                        os.makedirs(output_dir, exist_ok=True)
-                        
-                        # Resize and save
-                        resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-                        output_path = os.path.join(output_dir, os.path.basename(img_path))
-                        resized_img.save(output_path, quality=95)
-                        resized += 1
-                        
-                        self.status.emit(
-                            f"Resized: {os.path.basename(img_path)}\n"
-                            f"Original: {width}x{height} → New: {new_width}x{new_height}"
-                        )
-                    else:
-                        self.status.emit(f"Skipped: {os.path.basename(img_path)} ({width}x{height})")
-
-                processed += 1
-                self.progress.emit(int(processed / total_files * 100))
-
-            except Exception as e:
-                self.status.emit(f"Error processing {img_path}: {str(e)}")
-
-        self.status.emit(f"\nCompleted: {processed} images processed, {resized} images resized")
+        image_resizer_engine.run(
+            {'folder': self.folder_path, 'max_resolution': self.max_resolution,
+             'recursive': self.recursive},
+            progress_cb=self._on_engine_progress,
+            stop_check=lambda: not self.is_running,
+        )
         self.finished.emit()
+
+    def _on_engine_progress(self, current, total, message=""):
+        # Engine -> GUI bridge: forward as the same status/progress signals.
+        if message:
+            self.status.emit(message)
+        if total:
+            self.progress.emit(int(current / total * 100))
 
     def stop(self):
         self.is_running = False

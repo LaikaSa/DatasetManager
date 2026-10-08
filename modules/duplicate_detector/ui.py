@@ -1,7 +1,8 @@
 """Duplicate detector tab: Qt UI + detection worker thread.
 
-The detection algorithm lives in detection.py (pure, testable) and the
-thumbnail cache in thumbnails.py.
+The detection algorithm lives in detection.py behind the Qt-free
+engine.py entry point; the thumbnail cache lives in thumbnails.py. The
+worker here is a thin shell that calls engine.run().
 """
 import os
 
@@ -16,7 +17,7 @@ from send2trash import send2trash
 
 from modules.logger import setup_logger
 from modules.utils import open_in_folder, print_progress_bar
-from .detection import collect_image_files, extract_features, group_images
+from . import engine
 from .thumbnails import (request_thumbnail, clear_thumbnail_cache,
                          _thumbnail_bridge)
 
@@ -229,57 +230,36 @@ class WorkerThread(QThread):
         self.hist_threshold = hist_threshold
         self.recursive = recursive
         self.is_running = True
+        self.summary = None
+        self._phase = None
 
     def run(self):
-        image_files = collect_image_files(self.folder_path, recursive=self.recursive)
+        params = {
+            'folder': self.folder_path,
+            'recursive': self.recursive,
+            'use_hash': self.use_hash,
+            'use_hist': self.use_hist,
+            'hash_threshold': self.hash_threshold,
+            'hist_threshold': self.hist_threshold,
+        }
+        self.summary = engine.run(params, progress_cb=self._on_progress,
+                                  stop_check=lambda: not self.is_running)
 
-        total_files = len(image_files)
-        logger.info(f"Found {total_files} images to process")
-        
-        # Store all images with their features
-        image_features = {}
-        sizes = {}  # path -> (width, height), collected here so the preview UI
-        # doesn't have to re-decode every image on the main thread
-
-        # First pass: calculate features for all images
-        logger.info("First pass: Calculating features")
-        for idx, image_path in enumerate(image_files):
-            if not self.is_running:
-                break
-
-            try:
-                features, size = extract_features(image_path, self.use_hash, self.use_hist)
-                image_features[image_path] = features
-                if size is not None:
-                    sizes[image_path] = size
-                print_progress_bar(idx + 1, total_files, prefix='Processing:')
-
-            except Exception as e:
-                logger.error(f"Error processing {image_path}: {str(e)}", exc_info=True)
-
-        print()  # New line after first pass
-
-        # Second pass: group similar images (vectorized)
-        logger.info("Second pass: Comparing images")
-        groups = group_images(
-            image_features, sizes,
-            self.use_hash, self.use_hist,
-            self.hash_threshold, self.hist_threshold,
-            progress_cb=lambda done, total: print_progress_bar(done, total, prefix='Comparing:'),
-            stop_check=lambda: not self.is_running,
-        )
-
-        print()  # New line after second pass
+        print()  # New line after the last pass that printed
 
         # Emit all groups
-        if groups:
-            logger.info(f"Found {len(groups)} groups of similar images")
-            for group in groups:
-                self.result.emit(group)
-        else:
-            logger.info("No duplicate images found")
+        for group in self.summary['groups']:
+            self.result.emit(group)
 
         self.finished.emit()
+
+    def _on_progress(self, current, total, message=""):
+        prefix = 'Comparing:' if message == 'grouping' else 'Processing:'
+        if self._phase is not None and prefix != self._phase:
+            print()  # New line after first pass
+        self._phase = prefix
+        self.progress.emit(current)
+        print_progress_bar(current, total, prefix=prefix)
 
     def stop(self):
         self.is_running = False

@@ -10,7 +10,6 @@ try:
     from huggingface_hub import hf_hub_try_to_load_from_cache as hf_try_to_load_from_cache
 except ImportError:  # huggingface_hub 1.x renamed it (drops the hf_ prefix)
     from huggingface_hub import try_to_load_from_cache as hf_try_to_load_from_cache
-from modules import settings
 from modules.logger import setup_logger
 
 logger = setup_logger()
@@ -65,6 +64,10 @@ class ImageCaptioner:
         if not os.path.exists(tags_path):
             raise FileNotFoundError(f"Tags file not found at: {tags_path}")
 
+        # Deferred: modules.settings pulls PySide6, and this class is used
+        # from the Qt-free engine (engine.py must not import Qt at module
+        # scope). Only the device fallback needs it.
+        from modules import settings
         # Resolve the compute device (global settings) and load model
         if device_id is None:
             device_id = settings.get_selected_device_id()

@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Set, Dict, List, Tuple, Union
 from PySide6.QtGui import QPixmap
 from collections import Counter
+from . import engine
 
 @dataclass
 class ImageData:
@@ -47,8 +48,9 @@ class DataModel:
     def remove_tags(self, tags_to_remove: Set[str]) -> None:
         print(f"Removing tags: {tags_to_remove}")
         for image_data in self.images.values():
-            if set(image_data.tags) & tags_to_remove:  # If there are tags to remove
-                image_data.tags = [t for t in image_data.tags if t not in tags_to_remove]
+            new_tags = engine.apply_remove(image_data.tags, tags_to_remove)
+            if new_tags is not None:  # If there are tags to remove
+                image_data.tags = new_tags
                 image_data.modified = True
                 self.modified_files.add(image_data.path)
         
@@ -67,45 +69,8 @@ class DataModel:
                 return
 
             for image_data in self.images.values():
-                tags = image_data.tags
-                changed = False
-
-                # Remove tags marked for replacement
-                if tags_to_replace and (set(tags) & tags_to_replace):
-                    tags = [t for t in tags if t not in tags_to_replace]
-                    changed = True
-
-                # Also strip any new_tags that already exist in the list —
-                # they will be re-inserted at the desired position (move, not duplicate)
-                new_tags_set = set(new_tags)
-                existing_new = new_tags_set & set(tags)
-                if existing_new:
-                    tags = [t for t in tags if t not in existing_new]
-                    changed = True
-
-                base_len = len(tags)
-                indices = []
-                for pos in positions:
-                    if pos == 'top':
-                        idx = 0
-                    elif pos == 'middle':
-                        idx = base_len // 2
-                    elif pos == 'bottom':
-                        idx = base_len
-                    elif isinstance(pos, tuple) and pos[0] == 'custom':
-                        idx = max(0, min(pos[1] - 1, base_len))
-                    else:
-                        continue
-                    indices.append(idx)
-
-                if not indices:
-                    indices = [base_len]  # default to bottom if nothing selected
-
-                # Insert highest index first so earlier indices stay valid
-                for idx in sorted(indices, reverse=True):
-                    tags[idx:idx] = new_tags
-                    changed = True
-
+                tags, changed = engine.apply_replace_add(
+                    image_data.tags, tags_to_replace, new_tags, positions)
                 if changed:
                     image_data.tags = tags
                     image_data.modified = True
@@ -151,21 +116,15 @@ class DataModel:
             # Create backup if requested
             if create_backup and txt_path.exists():
                 try:
-                    backup_num = 0
-                    while True:
-                        backup_path = txt_path.with_suffix(f'.{backup_num:03d}')
-                        if not backup_path.exists():
-                            txt_path.rename(backup_path)
-                            break
-                        backup_num += 1
+                    engine.backup_sidecar(txt_path)
                 except Exception as e:
                     print(f"Failed to create backup for {txt_path}: {e}")
                     continue
 
             # Write new tags to file
             try:
-                # Sort tags and join with commas
-                tag_text = ', '.join(image_data.tags)
+                # Join tags with commas (helper shared with the CLI engine)
+                tag_text = engine.serialize_tags(image_data.tags)
                 print(f"Writing tags to {txt_path}: {tag_text}")  # Debug print
                 
                 # Write to file

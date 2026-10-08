@@ -43,10 +43,10 @@ import queue
 import re
 import socket
 import threading
+import time
 
 import requests
 from PIL import Image
-from PySide6.QtCore import QThread, Signal
 
 from modules import config as app_config
 from modules.logger import setup_logger
@@ -373,18 +373,30 @@ class LocalLLMCaptioner:
             content_parts = []
             buf = b""
             done = False
+            # Deadline anchored to the last real model output (a "data:"
+            # SSE line). Keep-alive pings and blank lines do not count, so
+            # a server that accepts the request but never generates is
+            # aborted after request_timeout seconds of silence instead of
+            # blocking the run forever.
+            last_data = time.monotonic()
             while not done:
                 try:
                     kind, value = stream_queue.get(timeout=0.2)
                 except queue.Empty:
                     if should_stop and should_stop():
                         raise LocalLLMCancelled()
+                    if time.monotonic() - last_data > self.request_timeout:
+                        response.close()
+                        raise TimeoutError(
+                            f"no model output for {self.request_timeout}s")
                     continue
                 if kind == "error":
                     raise value
                 if kind == "eof":
                     break
                 if kind == "line":
+                    if value and value.startswith("data:"):
+                        last_data = time.monotonic()
                     if self._process_sse_line(value, content_parts,
                                               should_stop, response):
                         done = True
@@ -393,6 +405,8 @@ class LocalLLMCaptioner:
                 while b"\n" in buf:
                     raw_line, buf = buf.split(b"\n", 1)
                     line = raw_line.decode("utf-8", "replace").rstrip("\r")
+                    if line.startswith("data:"):
+                        last_data = time.monotonic()
                     if self._process_sse_line(line, content_parts,
                                               should_stop, response):
                         done = True
@@ -424,166 +438,3 @@ class LocalLLMCaptioner:
         return _REASONING_TAG_PATTERN.sub("", text)
 
 
-class NaturalLanguageCaptionThread(QThread):
-    caption_generated = Signal(str, str)
-    process_completed = Signal()
-    error_occurred = Signal(str)
-    stopped = Signal()
-
-    TAG_CAPTIONS_DIRNAME = "Tag Captions"
-
-    def __init__(self, captioner, folder_path, recursive=False,
-                 caption_prefix=""):
-        super().__init__()
-        self.captioner = captioner
-        self.folder_path = folder_path
-        self.recursive = recursive
-        self.caption_prefix = (caption_prefix or "").strip()
-        self._stop_event = threading.Event()
-
-    def request_stop(self):
-        """Cooperative stop: flag the loop to exit on its next check, and
-        immediately abort any in-flight request to the local model."""
-        self._stop_event.set()
-        self.captioner.stop_current_request()
-
-    def _should_stop(self):
-        return self._stop_event.is_set()
-
-    def _apply_prefix(self, caption):
-        """Prepend the user's prefix text to the generated caption.
-
-        Mirrors the tag-mode "Prefix tags" behavior: the prefix is put at
-        the very beginning, and ", " is inserted between it and the caption
-        unless the prefix already ends with a comma (so users can control
-        the exact separator themselves)."""
-        prefix = self.caption_prefix
-        if not prefix:
-            return caption
-        if not caption:
-            return prefix
-        if prefix.endswith(","):
-            return prefix + " " + caption
-        return prefix + ", " + caption
-
-    def run(self):
-        try:
-            image_files = self._get_image_files(self.folder_path)
-            total_files = len(image_files)
-            logger.info(f"Starting natural language caption generation for {total_files} images")
-
-            tag_captions_dir = os.path.join(self.folder_path, self.TAG_CAPTIONS_DIRNAME)
-
-            for image_path in image_files:
-                if self._should_stop():
-                    logger.info("Natural language captioning stopped by user")
-                    self.stopped.emit()
-                    return
-
-                try:
-                    tags_text = self._read_tags(image_path, tag_captions_dir)
-
-                    caption = self.captioner.caption_image(
-                        image_path,
-                        tags_text=tags_text,
-                        should_stop=self._should_stop,
-                    )
-                    caption = self._apply_prefix(caption)
-
-                    # Only after a caption has been received: move the tag
-                    # file into 'Tag Captions' (which frees <base>.txt),
-                    # then write the natural-language caption into the
-                    # freed name. If the request fails, the tag file stays
-                    # in place so a retry needs no manual cleanup.
-                    self._relocate_tags(image_path, tag_captions_dir)
-
-                    txt_path = os.path.splitext(image_path)[0] + '.txt'
-                    with open(txt_path, 'w', encoding='utf-8') as f:
-                        f.write(caption + '\n')
-
-                    self.caption_generated.emit(image_path, caption)
-
-                except LocalLLMCancelled:
-                    logger.info("Natural language captioning stopped by user")
-                    self.stopped.emit()
-                    return
-                except Exception as e:
-                    logger.error(f"Error processing {image_path}: {str(e)}")
-                    self.error_occurred.emit(f"Error processing {image_path}: {str(e)}")
-                    continue
-
-            logger.info("Natural language caption generation completed")
-            self.process_completed.emit()
-
-        except Exception as e:
-            error_msg = f"Process error: {str(e)}"
-            logger.error(error_msg)
-            self.error_occurred.emit(error_msg)
-
-    def _read_tags(self, image_path, tag_captions_dir):
-        """Read the Danbooru-tag .txt file for this image without moving
-        anything. Returns None if there are no existing tags.
-
-        The 'Tag Captions' copy takes priority: it only ever exists because
-        an earlier run relocated the real tags there, while a file beside
-        the image with the same name is then a generated caption, not tags."""
-        image_dir = os.path.dirname(image_path)
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
-        original_txt = os.path.join(image_dir, base_name + '.txt')
-
-        relative_dir = os.path.relpath(image_dir, self.folder_path)
-        mirrored_dir = os.path.normpath(os.path.join(tag_captions_dir, relative_dir))
-        mirrored_txt = os.path.join(mirrored_dir, base_name + '.txt')
-
-        if os.path.exists(mirrored_txt):
-            # Already relocated by an earlier run.
-            with open(mirrored_txt, 'r', encoding='utf-8') as f:
-                tags_text = f.read().strip()
-            return tags_text if tags_text else None
-
-        if os.path.exists(original_txt):
-            with open(original_txt, 'r', encoding='utf-8') as f:
-                tags_text = f.read().strip()
-            return tags_text if tags_text else None
-
-        return None
-
-    def _relocate_tags(self, image_path, tag_captions_dir):
-        """Move the Danbooru-tag .txt file beside this image into the 'Tag
-        Captions' folder (mirroring subfolder structure when recursive),
-        freeing <base>.txt for the natural-language caption. Called only
-        after a caption has been received, so a failed request leaves the
-        tag file in place. No-op when there is no tag file to move, or when
-        an earlier run already relocated it (the file beside the image is
-        then a generated caption, not tags)."""
-        image_dir = os.path.dirname(image_path)
-        base_name = os.path.splitext(os.path.basename(image_path))[0]
-        original_txt = os.path.join(image_dir, base_name + '.txt')
-        if not os.path.exists(original_txt):
-            return
-
-        relative_dir = os.path.relpath(image_dir, self.folder_path)
-        mirrored_dir = os.path.normpath(os.path.join(tag_captions_dir, relative_dir))
-        mirrored_txt = os.path.join(mirrored_dir, base_name + '.txt')
-        if os.path.exists(mirrored_txt):
-            return  # tags already relocated; original is a generated caption
-
-        os.makedirs(mirrored_dir, exist_ok=True)
-        os.replace(original_txt, mirrored_txt)
-
-    def _get_image_files(self, folder_path):
-        image_files = []
-        if self.recursive:
-            for root, dirs, files in os.walk(folder_path):
-                # Never descend into our own relocated-tags folder.
-                dirs[:] = [d for d in dirs if d != self.TAG_CAPTIONS_DIRNAME]
-                for file in files:
-                    if file.lower().endswith(IMAGE_EXTENSIONS):
-                        image_files.append(os.path.join(root, file))
-        else:
-            image_files = [
-                os.path.join(folder_path, f) for f in os.listdir(folder_path)
-                if os.path.isfile(os.path.join(folder_path, f)) and
-                f.lower().endswith(IMAGE_EXTENSIONS)
-            ]
-        return image_files

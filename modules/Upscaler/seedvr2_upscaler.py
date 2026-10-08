@@ -5,6 +5,10 @@ ByteDance SeedVR2) so the app can upscale a set of *images* with the
 ``seedvr2_ema_3b_fp16`` DiT + ``ema_vae_fp16`` VAE. Video-only concerns from the
 upstream repo are ignored: each image is treated as a single-frame clip.
 
+The Qt-free pipeline (SeedVR2Upscaler) lives in engine.py; this module keeps
+the constants, the HF-cache helpers and the thin QThread shells the tab
+drives.
+
 Public surface used by ``modules.Upscaler.upscaler``:
     SEEDVR2_DIT_MODEL / SEEDVR2_VAE_MODEL  - weight file names
     get_seedvr2_model_dir()                - where weights live on disk
@@ -154,6 +158,9 @@ class _SilentDebug:
 class SeedVR2UpscaleWorker(QThread):
     """QThread that upscales a list of images with SeedVR2 (single-frame mode).
 
+    Thin shell around engine.SeedVR2Upscaler; all pipeline logic lives there
+    so the CLI can drive the same code.
+
     seed: a fixed value (>=0) applies to every image; -1 draws a fresh random
     seed per image (ComfyUI-style randomize).
     """
@@ -166,198 +173,16 @@ class SeedVR2UpscaleWorker(QThread):
                  color_correction="wavelet", tile_vae=True, min_size=0):
         super().__init__()
         self.input_paths = input_paths if isinstance(input_paths, list) else [input_paths]
-        self.scale_factor = float(scale_factor)
-        self.min_size = int(min_size)  # >0 -> auto per-image scale factor
-        self.device = device
-        self.seed = int(seed)
-        self.color_correction = color_correction
-        # Tile BOTH VAE encode and decode to keep peak VRAM low on large images.
-        self.tile_vae = tile_vae
         self.is_running = True
-        self.runner = None
-        self.ctx = None
-        self.debug = _SilentDebug()
-
-    # ── model / runner lifecycle ───────────────────────────────────────────
-    def _setup_runner(self):
-        from modules.Upscaler.seedvr2.src.utils.constants import get_script_directory
-        from modules.Upscaler.seedvr2.src.core.generation_utils import (
-            setup_generation_context,
-            prepare_runner,
-            load_text_embeddings,
+        from .engine import SeedVR2Upscaler
+        self.engine = SeedVR2Upscaler(
+            scale_factor, device, seed, color_correction, tile_vae, min_size,
         )
 
-        if not are_seedvr2_models_downloaded():
-            raise FileNotFoundError(
-                f"SeedVR2 weights not found in {get_seedvr2_model_dir()}. "
-                "Download the model first."
-            )
-
-        self.status.emit(f"Loading SeedVR2 (device: {self.device})...")
-        logger.info("SeedVR2: loading models on %s", self.device)
-
-        # Offload target = the compute device, so "cache the model between
-        # images" keeps DiT + VAE resident on the GPU (not offloaded to CPU)
-        # and a batch of images reuses the loaded weights instead of the VAE
-        # being torn down (runner.vae -> None) after each image.
-        self.ctx = setup_generation_context(
-            dit_device=self.device,
-            vae_device=self.device,
-            dit_offload_device=self.device,
-            vae_offload_device=self.device,
-            debug=self.debug,
-        )
-
-        self.runner, cache_context = prepare_runner(
-            dit_model=SEEDVR2_DIT_MODEL,
-            vae_model=SEEDVR2_VAE_MODEL,
-            model_dir=get_seedvr2_model_dir(),
-            debug=self.debug,
-            ctx=self.ctx,
-            dit_cache=True,
-            vae_cache=True,
-            dit_id=SEEDVR2_DIT_CACHE_ID,
-            vae_id=SEEDVR2_VAE_CACHE_ID,
-            block_swap_config=None,
-            encode_tiled=self.tile_vae,
-            encode_tile_size=(512, 512),
-            encode_tile_overlap=(64, 64),
-            decode_tiled=self.tile_vae,
-            decode_tile_size=(512, 512),
-            decode_tile_overlap=(64, 64),
-            attention_mode="sdpa",
-        )
-        self.ctx["cache_context"] = cache_context
-
-        self.ctx["text_embeds"] = load_text_embeddings(
-            get_script_directory(), self.ctx["dit_device"],
-            self.ctx["compute_dtype"], self.debug,
-        )
-        self.status.emit("SeedVR2 models loaded")
-        logger.info("SeedVR2: models loaded")
-
-    def clear_gpu_memory(self):
-        from modules.Upscaler.seedvr2.src.optimization.memory_manager import complete_cleanup
-        from modules.Upscaler.seedvr2.src.core.model_cache import get_global_cache
-
-        if self.runner is not None:
-            try:
-                complete_cleanup(self.runner, debug=self.debug,
-                                 dit_cache=False, vae_cache=False)
-            except Exception as e:
-                logger.warning("SeedVR2 cleanup: %s", e)
-            self.runner = None
-        self.ctx = None
-        # complete_cleanup only drops the runner's OWN references. The
-        # vendored code also keeps DiT + VAE in a process-wide singleton
-        # (GlobalModelCache) - left alone, the ~6GB DiT + VAE stay in VRAM
-        # until the app exits. Remove our entries so VRAM is fully freed.
-        try:
-            cache = get_global_cache()
-            cache.remove_dit({"node_id": SEEDVR2_DIT_CACHE_ID}, debug=self.debug)
-            cache.remove_vae({"node_id": SEEDVR2_VAE_CACHE_ID}, debug=self.debug)
-        except Exception as e:
-            logger.warning("SeedVR2 cache cleanup: %s", e)
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-    # ── per-image processing ───────────────────────────────────────────────
-    def _load_frame(self, img_path):
-        img = Image.open(img_path).convert("RGB")
-        arr = np.array(img).astype(np.float32) / 255.0
-        frames = torch.from_numpy(arr[None, ...])  # [1, H, W, C] in [0, 1]
-        return frames, (img.height, img.width)
-
-    def _resolve_seed(self):
-        """Per-image seed: self.seed when fixed, uniform random when self.seed == -1.
-
-        Mirrors ComfyUI's randomize (uniform draw; its frontend caps at
-        2**53-1 only because of JS float precision). We cap at 2**32-1:
-        numpy's legacy seed() rejects more - same max the vendored node
-        widget uses.
-        """
-        if self.seed >= 0:
-            return self.seed
-        return random.randint(0, 2**32 - 1)
-
-    def _process_one(self, img_path, seed):
-        from modules.Upscaler.seedvr2.src.core.generation_phases import (
-            encode_all_batches,
-            upscale_all_batches,
-            decode_all_batches,
-            postprocess_all_batches,
-        )
-
-        frames, (h, w) = self._load_frame(img_path)
-        # SeedVR2 resizes the *shortest edge* to `resolution` (upscale only),
-        # padding to a multiple of 16 internally.
-        if self.min_size > 0:
-            # Auto mode: smallest 0.1 step (1.0, 1.1, ...) that brings the
-            # longest side to at least min_size, applied strictly to both
-            # sides so the aspect ratio is kept exactly.
-            steps = math.ceil(self.min_size * 10 / max(w, h) - 1e-9)
-            scale = max(1.0, steps / 10.0)
-            resolution = max(16, int(round(min(h, w) * scale)))
-        else:
-            resolution = int(round(min(h, w) * self.scale_factor))
-            resolution = max(resolution, 16)
-
-        # Reset per-run ctx state so batches don't leak across images.
-        self.ctx["all_latents"] = []
-        self.ctx["all_upscaled_latents"] = []
-        self.ctx["batch_samples"] = []
-        self.ctx["final_video"] = None
-        self.ctx["video_transform"] = None
-        self.ctx.pop("true_target_dims", None)
-
-        torch.manual_seed(seed)
-        np.random.seed(seed)
-
-        self.ctx = encode_all_batches(
-            self.runner, ctx=self.ctx, images=frames, debug=self.debug,
-            batch_size=1, uniform_batch_size=False, seed=seed,
-            progress_callback=None, temporal_overlap=0,
-            resolution=resolution, max_resolution=0,
-            input_noise_scale=0.0, color_correction=self.color_correction,
-        )
-        # cache_model=True: keep DiT/VAE on the GPU so the next image in a
-        # batch reuses them (otherwise the VAE is freed after each image).
-        self.ctx = upscale_all_batches(
-            self.runner, ctx=self.ctx, debug=self.debug, progress_callback=None,
-            seed=seed, latent_noise_scale=0.0, cache_model=True,
-        )
-        self.ctx = decode_all_batches(
-            self.runner, ctx=self.ctx, debug=self.debug,
-            progress_callback=None, cache_model=True,
-        )
-        self.ctx = postprocess_all_batches(
-            ctx=self.ctx, debug=self.debug, progress_callback=None,
-            color_correction=self.color_correction, prepend_frames=0,
-            temporal_overlap=0, batch_size=1,
-        )
-
-        sample = self.ctx["final_video"]
-        if torch.is_tensor(sample):
-            if sample.is_cuda or sample.is_mps:
-                sample = sample.cpu()
-            sample = sample.to(torch.float32)
-
-        out = sample[0]  # [H', W', C]
-        out = (out.numpy() * 255.0).clip(0, 255).astype(np.uint8)
-        return Image.fromarray(out)
-
-    def _save(self, img_path, out_img):
-        output_path = os.path.join(
-            os.path.dirname(img_path), "upscaled", os.path.basename(img_path)
-        )
-        os.makedirs(os.path.dirname(output_path), exist_ok=True)
-        out_img.save(output_path)
-        return output_path
-
-    # ── thread entry ───────────────────────────────────────────────────────
+    # ── thread entry ──────────────────────────────────────────────────────
     def run(self):
         try:
-            self._setup_runner()
+            self.engine._setup_runner(status_cb=self.status.emit)
 
             total = len(self.input_paths)
             processed = 0
@@ -371,11 +196,11 @@ class SeedVR2UpscaleWorker(QThread):
                 self.status.emit(f"Upscaling [{idx}/{total}]: {os.path.basename(img_path)}")
                 logger.info("SeedVR2 processing: %s", os.path.basename(img_path))
                 try:
-                    seed = self._resolve_seed()
-                    if self.seed == -1:
+                    seed = self.engine._resolve_seed()
+                    if self.engine.seed == -1:
                         self.status.emit(f"Seed: {seed}")
-                    out_img = self._process_one(img_path, seed)
-                    self._save(img_path, out_img)
+                    out_img = self.engine._process_one(img_path, seed)
+                    self.engine._save(img_path, out_img)
                 except Exception as e:
                     self.status.emit(f"Error processing {img_path}: {e}")
                     logger.exception("SeedVR2 image failed: %s", img_path)
@@ -396,7 +221,7 @@ class SeedVR2UpscaleWorker(QThread):
         finally:
             # Free DiT + VAE + CUDA cache once the WHOLE batch is done
             # (or stopped) - never per image.
-            self.clear_gpu_memory()
+            self.engine.clear_gpu_memory()
             self.status.emit("GPU memory freed")
             self.finished.emit()
 

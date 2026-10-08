@@ -10,6 +10,7 @@ from modules import settings as app_settings
 import os
 import shutil
 from send2trash import send2trash
+from . import engine
 
 class TagEditorTab(QWidget):
     def __init__(self):
@@ -324,13 +325,7 @@ class TagEditorTab(QWidget):
         # Process caption changes first
         for image_path, new_caption in self.modified_captions.items():
             print(f"Processing caption change for {image_path}")  # Debug print
-            seen = set()
-            new_tags = []
-            for tag in new_caption.split(','):
-                tag = tag.strip()
-                if tag and tag not in seen:
-                    seen.add(tag)
-                    new_tags.append(tag)
+            new_tags = engine.parse_tags(new_caption, lowercase=False)
             self.data_model.update_image_tags(image_path, new_tags)
         
         # Save all changes to disk

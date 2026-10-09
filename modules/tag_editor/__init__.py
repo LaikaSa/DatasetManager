@@ -1,5 +1,5 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, QLabel,
-                              QPushButton, QFileDialog, QMessageBox, QCheckBox, QSplitter)
+                              QPushButton, QFileDialog, QCheckBox, QSplitter)
 from PySide6.QtCore import Qt
 from .gallery_view import GalleryView
 from .tag_panel import TagPanel
@@ -7,10 +7,13 @@ from .data_model import DataModel
 from .loading_thread import LoadingThread
 from .parallel_loader import ParallelLoader
 from modules import settings as app_settings
+from modules.logger import setup_logger
 import os
 import shutil
 from send2trash import send2trash
 from . import engine
+
+logger = setup_logger()
 
 class TagEditorTab(QWidget):
     def __init__(self):
@@ -113,12 +116,12 @@ class TagEditorTab(QWidget):
 
     def on_caption_changed(self, image_path: str, new_caption: str):
         """Handle caption changes"""
-        print(f"Caption changed for {image_path}")
+        logger.debug("Caption changed for %s", image_path)
         self.modified_captions[image_path] = new_caption
         self.save_btn.setEnabled(True)
 
     def on_filter_changed(self, tags: set, combine_logic: str, filter_logic: str):
-        print(f"TagEditorTab applying filter: {len(tags)} tags")
+        logger.debug("Applying filter: %d tags", len(tags))
         filtered_images = self.data_model.filter_images(tags, combine_logic, filter_logic)
         
         # Update gallery with filtered images directly
@@ -202,7 +205,7 @@ class TagEditorTab(QWidget):
 
     def unload_folder(self):
         """Unload current folder and clear all data"""
-        print("Unloading folder...")  # Debug print
+        logger.debug("Unloading folder...")
         # Don't clear out from under a running load thread
         if self.loading_thread is not None and self.loading_thread.isRunning():
             self.loading_thread.wait(5000)
@@ -213,11 +216,11 @@ class TagEditorTab(QWidget):
         self.save_btn.setEnabled(False)
         # Update counter explicitly
         self.tag_panel.update_counter(0, 0)
-        print("Folder unloaded")  # Debug print
+        logger.debug("Folder unloaded")
 
     def remove_tags(self, tags: set):
         """Handle tag removal request"""
-        print(f"Removing {len(tags)} tags")
+        logger.debug("Removing %d tags", len(tags))
         self.data_model.remove_tags(tags)
         
         # Clear all tag selections before updating tags (also resets FilterTab's own selected_tags)
@@ -233,7 +236,7 @@ class TagEditorTab(QWidget):
         
     def replace_add_tags(self, replace_tags: set, new_tags: list, positions: list):
             """Handle replace/add tags request"""
-            print(f"Replace/add: removing {len(replace_tags)} tags, inserting {len(new_tags)} at {positions}")
+            logger.debug("Replace/add: removing %d tags, inserting %d at %s", len(replace_tags), len(new_tags), positions)
             self.data_model.replace_or_add_tags(replace_tags, new_tags, positions)
 
             # Clear filter selections in case a replaced tag was being filtered on
@@ -264,7 +267,7 @@ class TagEditorTab(QWidget):
                     send2trash(img_path)  # Send to recycle bin instead of permanent deletion
                     deleted_images += 1
                 except Exception as e:
-                    print(f"Error sending image to recycle bin {img_path}: {e}")
+                    logger.error("Error sending image to recycle bin %s: %s", img_path, e)
 
             if delete_captions:
                 caption_path = os.path.splitext(img_path)[0] + '.txt'
@@ -273,12 +276,13 @@ class TagEditorTab(QWidget):
                         send2trash(caption_path)  # Send to recycle bin instead of permanent deletion
                         deleted_captions += 1
                 except Exception as e:
-                    print(f"Error sending caption to recycle bin {caption_path}: {e}")
+                    logger.error("Error sending caption to recycle bin %s: %s", caption_path, e)
 
         # Reload folder to reflect changes
         self.load_folder()
-        print(f"Moved {deleted_images} images and {deleted_captions} caption files to recycle bin"
-              + (f" (skipped {missing_images} files that no longer exist)" if missing_images else ""))
+        logger.info("Moved %d images and %d caption files to recycle bin%s",
+                    deleted_images, deleted_captions,
+                    f" (skipped {missing_images} files that no longer exist)" if missing_images else "")
 
     def move_files(self, destination: str, move_images: bool, move_captions: bool):
         """Move displayed files"""
@@ -298,7 +302,7 @@ class TagEditorTab(QWidget):
                     shutil.move(img_path, new_img_path)
                     moved_images += 1
                 except Exception as e:
-                    print(f"Error moving image {img_path}: {e}")
+                    logger.error("Error moving image %s: %s", img_path, e)
 
             if move_captions:
                 caption_path = os.path.splitext(img_path)[0] + '.txt'
@@ -311,26 +315,27 @@ class TagEditorTab(QWidget):
                         shutil.move(caption_path, new_caption_path)
                         moved_captions += 1
                     except Exception as e:
-                        print(f"Error moving caption {caption_path}: {e}")
+                        logger.error("Error moving caption %s: %s", caption_path, e)
 
         # Reload folder to reflect changes
         self.load_folder()
-        print(f"Moved {moved_images} images and {moved_captions} caption files"
-              + (f" (skipped {missing_images} files that no longer exist)" if missing_images else ""))
+        logger.info("Moved %d images and %d caption files%s",
+                    moved_images, moved_captions,
+                    f" (skipped {missing_images} files that no longer exist)" if missing_images else "")
 
     def save_changes(self):
         """Save all pending changes"""
-        print("Starting save process...")  # Debug print
+        logger.debug("Starting save process...")
         
         # Process caption changes first
         for image_path, new_caption in self.modified_captions.items():
-            print(f"Processing caption change for {image_path}")  # Debug print
+            logger.debug("Processing caption change for %s", image_path)
             new_tags = engine.parse_tags(new_caption, lowercase=False)
             self.data_model.update_image_tags(image_path, new_tags)
         
         # Save all changes to disk
         saved, total = self.data_model.save_changes(create_backup=self.backup_cb.isChecked())
-        print(f"Saved {saved}/{total} files")  # Debug print
+        logger.info("Saved %d/%d files", saved, total)
         
         # Clear pending changes
         self.modified_captions.clear()

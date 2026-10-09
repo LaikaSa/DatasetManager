@@ -1,12 +1,11 @@
-import sys
-
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLineEdit, 
                              QPushButton, QCheckBox, QComboBox, QLabel, 
                              QFileDialog, QTabWidget)
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QThread, Signal
 from .. import settings as app_settings
 from . import engine
 from .extension_manager import ExtensionManagerTab
+from ..utils import print_progress_bar
 
 class ConversionWorker(QThread):
     finished = Signal()
@@ -30,7 +29,7 @@ class ConversionWorker(QThread):
                     "recursive": self.recursive,
                     "use_parallel": self.use_parallel,
                 },
-                progress_cb=self.print_progress_bar,
+                progress_cb=lambda c, t: print_progress_bar(c, t, prefix='Converting:'),
                 stop_check=lambda: not self.is_running,
             )
             if summary["total"] == 0:
@@ -47,13 +46,6 @@ class ConversionWorker(QThread):
     def stop(self):
         self.is_running = False
 
-    def print_progress_bar(self, current, total, bar_length=50):
-        """Print a progress bar to the terminal."""
-        progress = float(current) / total
-        filled_length = int(bar_length * progress)
-        bar = '=' * filled_length + '-' * (bar_length - filled_length)
-        sys.stdout.write(f'\r[{bar}] {current}/{total}')
-        sys.stdout.flush()
 
 class IccFixWorker(QThread):
     finished = Signal(dict)
@@ -77,7 +69,7 @@ class IccFixWorker(QThread):
                     "backup": self.backup,
                     "dry_run": self.dry_run,
                 },
-                progress_cb=self.print_progress_bar,
+                progress_cb=lambda c, t: print_progress_bar(c, t, prefix='Fixing:'),
                 stop_check=lambda: not self.is_running,
             )
             if summary["total"] == 0:
@@ -95,13 +87,6 @@ class IccFixWorker(QThread):
     def stop(self):
         self.is_running = False
 
-    def print_progress_bar(self, current, total, bar_length=50):
-        """Print a progress bar to the terminal."""
-        progress = float(current) / total
-        filled_length = int(bar_length * progress)
-        bar = '=' * filled_length + '-' * (bar_length - filled_length)
-        sys.stdout.write(f'\r[{bar}] {current}/{total}')
-        sys.stdout.flush()
 
 class ConversionTab(QWidget):
     def __init__(self):
@@ -116,7 +101,6 @@ class ConversionTab(QWidget):
         top_layout = QHBoxLayout()
         
         # Folder input (with reduced width) and browse
-        folder_layout = QHBoxLayout()
         self.path_input = QLineEdit()
         self.path_input.setPlaceholderText("Enter folder path...")
         self.path_input.setMinimumWidth(300)  # Set a smaller minimum width

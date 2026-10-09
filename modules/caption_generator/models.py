@@ -1,8 +1,6 @@
 import gc
-import onnxruntime
 import numpy as np
 import os
-import multiprocessing
 import pandas as pd
 from PIL import Image
 from huggingface_hub import hf_hub_download
@@ -23,16 +21,12 @@ class ImageCaptioner:
         'wd-swinv2-tagger-v3': {
             'type': 'swinv2-v3',
             'repo_id': 'SmilingWolf/wd-swinv2-tagger-v3'
-        },
-        'wd-convnext-tagger-v3': {
-            'type': 'convnext-v3',
-            'repo_id': 'SmilingWolf/wd-convnext-tagger-v3'
         }
     }
 
     def __init__(self, model_name='wd-eva02-large-tagger-v3', debug_mode=False, device_id=None):
         self.debug_mode = debug_mode  # Store debug mode as instance variable
-        print(f"Initializing ImageCaptioner with model: {model_name}")
+        logger.info("Initializing ImageCaptioner with model: %s", model_name)
         
         if model_name not in self.MODELS:
             raise ValueError(f"Unknown model: {model_name}. Available models: {list(self.MODELS.keys())}")
@@ -55,8 +49,7 @@ class ImageCaptioner:
         if tags_path is None:
             tags_path = hf_hub_download(repo_id, "selected_tags.csv")
         
-        print(f"Looking for model at: {model_path}")
-        print(f"Looking for tags at: {tags_path}")
+        logger.debug("Model file: %s | tags file: %s", model_path, tags_path)
 
         # Verify paths
         if not os.path.exists(model_path):
@@ -72,7 +65,7 @@ class ImageCaptioner:
         if device_id is None:
             device_id = settings.get_selected_device_id()
         self.device_id = device_id
-        print(f"Using device: {settings.device_label(device_id)}")
+        logger.info("Using device: %s", settings.device_label(device_id))
 
         # Load model
         self.session = self.create_session(model_path, device_id)
@@ -86,15 +79,14 @@ class ImageCaptioner:
         # Get model input shape
         _, height, width, _ = self.session.get_inputs()[0].shape
         self.target_size = height
-        print(f"Model input shape: {height}x{width}")
+        logger.info("Model input shape: %dx%d", height, width)
 
     def create_session(self, model_path, device_id=None):
         try:
             import onnxruntime as ort
 
-            print(f"Loading ONNX model: {model_path}")
-
-            print(f"Available providers: {ort.get_available_providers()}")
+            logger.info("Loading ONNX model: %s", model_path)
+            logger.debug("Available providers: %s", ort.get_available_providers())
             
             # Configure session options
             session_options = ort.SessionOptions()
@@ -128,15 +120,15 @@ class ImageCaptioner:
                     'cudnn_conv_algo_search': 'HEURISTIC',
                 })
             elif use_cuda:
-                print(f"CUDA requested (GPU {device_id}) but CUDAExecutionProvider is "
-                      "unavailable in this onnxruntime build; falling back to CPU")
+                logger.warning("CUDA requested (GPU %d) but CUDAExecutionProvider "
+                               "is unavailable in this onnxruntime build; "
+                               "falling back to CPU", device_id)
             
             # Always add CPU provider
             providers.append("CPUExecutionProvider")
             provider_options.append({})
             
-            print(f"Using providers: {providers}")
-            print(f"With options: {provider_options}")
+            logger.debug("Using providers: %s (options: %s)", providers, provider_options)
 
             # Create session (no separate onnx.load just to read the input
             # name - the session exposes it directly, which skips parsing
@@ -149,26 +141,25 @@ class ImageCaptioner:
             )
             self.input_name = session.get_inputs()[0].name
 
-            print(f"Session created successfully with active providers: {session.get_providers()}")
-            print(f"Input name: {self.input_name}")
+            logger.info("Session created with active providers: %s (input: %s)",
+                        session.get_providers(), self.input_name)
             return session
 
         except Exception as e:
-            print(f"Error creating ONNX session: {e}")
-            print(f"Exception type: {type(e)}")
-            print(f"Exception args: {e.args}")
+            logger.error("Error creating ONNX session: %s (%s: %s)",
+                         e, type(e).__name__, e.args)
             
             try:
-                print("Attempting fallback with minimal settings...")
+                logger.info("Attempting fallback with minimal settings...")
                 session = ort.InferenceSession(
                     model_path,
                     providers=['CPUExecutionProvider'],
                     provider_options=[{}]
                 )
-                print("Successfully created basic session")
+                logger.info("Successfully created basic session")
                 return session
             except Exception as fallback_e:
-                print(f"Fallback also failed: {fallback_e}")
+                logger.error("Fallback also failed: %s", fallback_e)
                 return None
 
     def release(self):

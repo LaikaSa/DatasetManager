@@ -151,7 +151,7 @@ class CaptionGeneratorTab(QWidget):
                 self.model_combo.setCurrentText(default_model)
             self.on_model_changed()
         except Exception as e:
-            print(f"Error setting up default model: {str(e)}")
+            logger.error("Error setting up default model: %s", e)
 
     def init_ui(self):
         layout = QVBoxLayout()
@@ -177,8 +177,7 @@ class CaptionGeneratorTab(QWidget):
         self.model_combo = QComboBox()
         self.model_combo.addItems([
             'wd-eva02-large-tagger-v3',
-            'wd-swinv2-tagger-v3',
-            'wd-convnext-tagger-v3'
+            'wd-swinv2-tagger-v3'
         ])
         self.model_combo.addItem(NATURAL_LANGUAGE_OPTION)
         self.download_btn = QPushButton("Download Model")
@@ -450,14 +449,14 @@ class CaptionGeneratorTab(QWidget):
             exists = model_path is not None and tags_path is not None
             return exists
         except Exception as e:
-            print(f"Error checking model existence: {str(e)}")
+            logger.error("Error checking model existence: %s", e)
             return False
 
     def on_model_changed(self):
         """Handle model change event"""
         try:
             model_name = self.model_combo.currentText()
-            print(f"Model changed to: {model_name}")  # Debug print
+            logger.debug("Model changed to: %s", model_name)
 
             if model_name == NATURAL_LANGUAGE_OPTION:
                 self.download_btn.hide()
@@ -480,20 +479,20 @@ class CaptionGeneratorTab(QWidget):
             self.wd_options_container.show()
             
             if self.check_model_exists(model_name):
-                print(f"Model files found for {model_name}")  # Debug print
+                logger.debug("Model files found for %s", model_name)
                 self.download_btn.hide()
                 # Drop any cached captioner so the (heavy) ONNX model is
                 # only (re)built on the next "Generate Captions" click
                 self.captioner = None
                 self.validate_folder(self.path_input.text())
             else:
-                print(f"Model files not found for {model_name}")  # Debug print
+                logger.debug("Model files not found for %s", model_name)
                 self.download_btn.show()
                 self.start_btn.setEnabled(False)
                 self.captioner = None
                 self.status_text.append(f"Model {model_name} not found. Click Download Model to download it.")
         except Exception as e:
-            print(f"Error in on_model_changed: {str(e)}")  # Debug print
+            logger.error("Error in on_model_changed: %s", e)
             self.status_text.append(f"Error changing model: {str(e)}")
 
     def on_training_type_changed(self):
@@ -629,10 +628,10 @@ class CaptionGeneratorTab(QWidget):
                 self.validate_folder(self.path_input.text())
                 return
 
-            print(f"Initializing captioner with model: {model_name}")
+            logger.info("Initializing captioner with model: %s", model_name)
             
             if not self.check_model_exists(model_name):
-                print(f"Model files not found during initialization")
+                logger.debug("Model files not found during initialization")
                 self.status_text.append(f"Model {model_name} not found. Please download it first.")
                 self.download_btn.show()
                 self.start_btn.setEnabled(False)
@@ -656,7 +655,6 @@ class CaptionGeneratorTab(QWidget):
             
         except Exception as e:
             error_msg = f"Error loading caption model: {str(e)}"
-            print(f"Initialization error: {error_msg}")
             self.status_text.append(error_msg)
             logger.error(error_msg)
             self.start_btn.setEnabled(False)
@@ -756,7 +754,7 @@ class CaptionGeneratorTab(QWidget):
             self.worker.stopped.connect(self.process_stopped)
             self.worker.error_occurred.connect(self.handle_error)
 
-            logger.info(f"Starting natural language caption generation with settings:")
+            logger.info("Starting natural language caption generation with settings:")
             logger.info(f"Folder: {folder_path}")
             logger.info(f"Local LLM URL: {self.captioner.base_url}")
             logger.info(f"Local LLM API key: {'set' if self.captioner.api_key else 'not set'}")
@@ -797,9 +795,9 @@ class CaptionGeneratorTab(QWidget):
         self.worker.error_occurred.connect(self.handle_error)
         
         # Basic info always shown
-        logger.info(f"Starting caption generation with settings:")
+        logger.info("Starting caption generation with settings:")
         logger.info(f"Folder: {folder_path}")
-        logger.info(f"Options:")
+        logger.info("Options:")
         logger.info(f"  - Append mode: {self.append_cb.isChecked()}")
         logger.info(f"  - Rating tags: {self.rating_cb.isChecked()}")
         logger.info(f"  - Remove underscores: {self.underscore_cb.isChecked()}")
@@ -808,7 +806,7 @@ class CaptionGeneratorTab(QWidget):
         # Detailed info only in debug mode
         if self.debug_cb.isChecked():
             logger.debug("Detailed settings:")
-            logger.debug(f"  Thresholds:")
+            logger.debug("  Thresholds:")
             logger.debug(f"    - General: {general_threshold:.3f}")
             logger.debug(f"    - Character: {character_threshold:.3f}")
             logger.debug(f"    - Overall: {thresh:.3f}")

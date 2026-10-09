@@ -4,6 +4,9 @@ from typing import Set, Dict, List, Tuple, Union
 from PySide6.QtGui import QPixmap
 from collections import Counter
 from . import engine
+from modules.logger import setup_logger
+
+logger = setup_logger()
 
 @dataclass
 class ImageData:
@@ -21,8 +24,9 @@ class DataModel:
     def filter_images(self, tags: Set[str], combine_logic: str = "AND",
                      filter_logic: str = "POSITIVE") -> List[ImageData]:
         """Filter images based on tags and logic"""
-        print(f"Filtering with {len(tags)} tags using {combine_logic} logic and {filter_logic} mode")
-        print(f"Tags to filter: {tags}")
+        logger.debug("Filtering with %d tags using %s logic and %s mode",
+                     len(tags), combine_logic, filter_logic)
+        logger.debug("Tags to filter: %s", tags)
         
         if not tags:
             return list(self.images.values())
@@ -42,11 +46,11 @@ class DataModel:
                 if not matches:
                     matching_images.append(image_data)
 
-        print(f"Found {len(matching_images)} matching images with {filter_logic} logic")
+        logger.debug("Found %d matching images with %s logic", len(matching_images), filter_logic)
         return matching_images
 
     def remove_tags(self, tags_to_remove: Set[str]) -> None:
-        print(f"Removing tags: {tags_to_remove}")
+        logger.debug("Removing tags: %s", tags_to_remove)
         for image_data in self.images.values():
             new_tags = engine.apply_remove(image_data.tags, tags_to_remove)
             if new_tags is not None:  # If there are tags to remove
@@ -82,7 +86,7 @@ class DataModel:
         self.tag_frequencies.clear()
         for image_data in self.images.values():
             self.tag_frequencies.update(image_data.tags)
-        print(f"Updated tag frequencies: {len(self.tag_frequencies)} unique tags")
+        logger.debug("Updated tag frequencies: %d unique tags", len(self.tag_frequencies))
 
     def update_image_tags(self, image_path: str, new_tags):
         """Update tags for an image.
@@ -118,26 +122,26 @@ class DataModel:
                 try:
                     engine.backup_sidecar(txt_path)
                 except Exception as e:
-                    print(f"Failed to create backup for {txt_path}: {e}")
+                    logger.error("Failed to create backup for %s: %s", txt_path, e)
                     continue
 
             # Write new tags to file
             try:
                 # Join tags with commas (helper shared with the CLI engine)
                 tag_text = engine.serialize_tags(image_data.tags)
-                print(f"Writing tags to {txt_path}: {tag_text}")  # Debug print
+                logger.debug("Writing tags to %s: %s", txt_path, tag_text)
                 
                 # Write to file
                 txt_path.write_text(tag_text, encoding='utf-8')
                 image_data.modified = False
                 saved_count += 1
-                print(f"Successfully saved {txt_path}")  # Debug print
+                logger.debug("Successfully saved %s", txt_path)
             except Exception as e:
-                print(f"Failed to save {txt_path}: {e}")
+                logger.error("Failed to save %s: %s", txt_path, e)
 
         total_modified = len(self.modified_files)
         self.modified_files.clear()
-        print(f"Saved {saved_count}/{total_modified} files")  # Debug print
+        logger.info("Saved %d/%d files", saved_count, total_modified)
         return saved_count, total_modified
 
     def clear(self) -> None:

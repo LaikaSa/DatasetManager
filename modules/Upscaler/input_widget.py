@@ -8,11 +8,10 @@ import os
 
 from PIL import Image
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
-                              QPushButton, QToolButton, QCheckBox, QLineEdit,
+                              QToolButton, QCheckBox, QLineEdit,
                               QListWidget, QListWidgetItem, QFileDialog,
                               QLabel, QMenu)
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QDropEvent
 
 from modules.logger import setup_logger
 from modules.utils import IMAGE_EXTENSIONS, open_in_folder
@@ -153,17 +152,6 @@ class InputWidget(QWidget):
         self.refresh_list()
         self.input_changed.emit()
 
-    def set_folder(self, folder_path):
-        self._set_path_text(folder_path)
-        self.load_folder(folder_path)
-
-    def add_file(self, file_path):
-        if file_path.lower().endswith(IMAGE_EXTENSIONS):
-            if file_path not in self.selected_paths:
-                self.selected_paths.append(file_path)
-                self._set_path_text(file_path)
-                self.refresh_list()
-                self.input_changed.emit()
 
     def clear(self):
         self.input_type = None
@@ -239,8 +227,6 @@ class InputWidget(QWidget):
         self._filter_max_res = int(max_res)
         self.refresh_list()
 
-    def update_list(self):
-        self.refresh_list()
 
     def show_context_menu(self, pos):
         item = self.file_list.itemAt(pos)

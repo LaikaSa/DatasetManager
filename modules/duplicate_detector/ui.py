@@ -8,7 +8,7 @@ import os
 
 from PIL import Image
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
-                              QFileDialog, QMessageBox, QProgressBar, QCheckBox,
+                              QFileDialog, QMessageBox, QCheckBox,
                               QSlider, QHBoxLayout, QGroupBox, QScrollArea, QLineEdit,
                               QApplication)
 from PySide6.QtCore import Qt, QThread, Signal, QTimer

@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QPushButton,
-                              QLabel, QListWidget, QCheckBox, QMessageBox)
-from PySide6.QtCore import Qt, QTimer
+                              QLabel, QListWidget, QMessageBox)
+from PySide6.QtCore import QTimer
 import os
 import send2trash
 from collections import defaultdict

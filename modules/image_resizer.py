@@ -2,7 +2,7 @@ import os
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QPushButton, QLabel,
                               QFileDialog, QProgressBar, QHBoxLayout,
                               QSpinBox, QLineEdit, QTextEdit, QCheckBox)
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import QThread, Signal
 
 from modules import image_resizer_engine
 

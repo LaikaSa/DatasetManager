@@ -14,7 +14,21 @@ from modules.logger import setup_logger
 logger = setup_logger()
 
 
-class CaptionGeneratorThread(QThread):
+class _StopControl:
+    """Cooperative-stop methods shared by the caption worker threads.
+
+    Subclasses create ``self._stop_event`` in ``__init__``; the GUI calls
+    ``request_stop()`` and the worker polls ``_should_stop()``.
+    """
+
+    def request_stop(self):
+        self._stop_event.set()
+
+    def _should_stop(self):
+        return self._stop_event.is_set()
+
+
+class CaptionGeneratorThread(QThread, _StopControl):
     caption_generated = Signal(str, str)
     process_completed = Signal()
     error_occurred = Signal(str)
@@ -40,12 +54,6 @@ class CaptionGeneratorThread(QThread):
         self.batch_size = batch_size
         self.worker_count = worker_count
         self._stop_event = threading.Event()
-
-    def request_stop(self):
-        self._stop_event.set()
-
-    def _should_stop(self):
-        return self._stop_event.is_set()
 
     def run(self):
         try:
@@ -88,7 +96,7 @@ class CaptionGeneratorThread(QThread):
             self.error_occurred.emit(f"Process error: {str(e)}")
 
 
-class NaturalLanguageCaptionThread(QThread):
+class NaturalLanguageCaptionThread(QThread, _StopControl):
     caption_generated = Signal(str, str)
     process_completed = Signal()
     error_occurred = Signal(str)
@@ -103,16 +111,13 @@ class NaturalLanguageCaptionThread(QThread):
         self._stop_event = threading.Event()
 
     def request_stop(self):
-        self._stop_event.set()
+        super().request_stop()
         # Abort an in-flight streaming request right away, not at the next
         # image boundary (LocalLLMCaptioner closes the HTTP connection).
         try:
             self.captioner.stop_current_request()
         except Exception:
             pass
-
-    def _should_stop(self):
-        return self._stop_event.is_set()
 
     def run(self):
         try:

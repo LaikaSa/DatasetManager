@@ -1,13 +1,12 @@
 """RealESRGAN upscaling workers (thin Qt shells).
 
-The Qt-free pipeline (RRDBNet + RealESRGANUpscaler + download) lives in
-engine.py; this module only keeps the QThread wrappers the tab drives.
+The Qt-free pipeline (spandrel model loading + RealESRGANUpscaler +
+download) lives in engine.py; this module only keeps the QThread
+wrappers the tab drives.
 """
 import os
 import datetime
 
-import torch
-from PIL import Image
 from PySide6.QtCore import QThread, Signal
 
 from modules.logger import setup_logger
@@ -18,22 +17,19 @@ logger = setup_logger()
 
 
 class ModelDownloadWorker(QThread):
-    """Downloads the RealESRGAN weights off the GUI thread into a .part file,
-    then renames it into place, so an interrupted download can never leave a
-    partial file behind that looks like a valid model."""
+    """Downloads the RealESRGAN weights off the GUI thread into the shared
+    HF cache; huggingface_hub handles resume and atomicity, so an
+    interrupted download never leaves a partial file behind."""
 
     status = Signal(str)
     finished_ok = Signal(bool)
 
-    def __init__(self, url, dest_path):
+    def __init__(self, dest_path=None):
         super().__init__()
-        self.url = url
         self.dest_path = dest_path
         self.is_running = True
 
     def run(self):
-        # The engine owns the .part + rename logic and the canonical
-        # RealESRGAN URL; the url ctor arg is kept for constructor parity.
         ok = download_model("realesrgan", self.dest_path,
                             status_cb=self.status.emit,
                             stop_check=lambda: not self.is_running)

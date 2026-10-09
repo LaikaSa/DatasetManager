@@ -11,6 +11,8 @@ onnx==1.23.0
 onnxruntime-gpu==1.30.0
 colorama==0.4.6
 tqdm==4.70.1
+# Upscaler model loading (auto-detects RRDB/SwinIR/HAT/DAT .pth architectures)
+spandrel==0.4.2
 # SeedVR2 upscaler (modules/Upscaler/seedvr2_upscaler.py + vendored modules/Upscaler/seedvr2)
 # NOTE: torch/torchvision are NOT listed here on purpose. install.bat installs
 # torch==2.14.0+cu126 and re-pins it AFTER this file, because diffusers/transformers/

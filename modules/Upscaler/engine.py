@@ -10,83 +10,34 @@ prints. Progress/stop follow the shared engine contract:
 import os
 import math
 import random
-import datetime
 import shutil
 from pathlib import Path
 
 import numpy as np
 import torch
-import torch.nn as nn
 from PIL import Image
 
 from modules.logger import setup_logger
 from modules.utils import IMAGE_EXTENSIONS
+from modules import settings
 
 logger = setup_logger()
 
 LANCZOS = (Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.LANCZOS)
 
 ROOT_DIR = Path(__file__).resolve().parent.parent.parent
-REAL_ESRGAN_MODEL_NAME = "RealESRGAN_x4plus_anime_6B.pth"
-REAL_ESRGAN_MODEL_PATH = ROOT_DIR / "models" / REAL_ESRGAN_MODEL_NAME
-REAL_ESRGAN_MODEL_URL = ("https://github.com/xinntao/Real-ESRGAN/releases/"
-                         "download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth")
+REAL_ESRGAN_HF_REPO = "Kim2091/UltraSharpV2"
+REAL_ESRGAN_MODEL_FILE = "4x-UltraSharpV2.pth"
 
 
-# ── RealESRGAN network (moved from realesrgan.py; torch-only) ─────────────
-class RRDBNet(nn.Module):
-    def __init__(self, num_in_ch=3, num_out_ch=3, num_feat=64, num_block=23, num_grow_ch=32):
-        super(RRDBNet, self).__init__()
-        self.conv_head = nn.Conv2d(num_in_ch, num_feat, 3, 1, 1)
-        self.body = nn.Sequential(*[RRDB(num_feat, num_grow_ch) for _ in range(num_block)])
-        self.conv_body = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.conv_tail = nn.Conv2d(num_feat, num_out_ch, 3, 1, 1)
-        self.lrelu = nn.LeakyReLU(0.2, inplace=True)
-
-    def forward(self, x):
-        feat = self.conv_head(x)
-        feat = self.body(feat)
-        feat = self.conv_body(feat)
-        out = self.conv_tail(self.lrelu(feat))
-        return out
-
-
-class RRDB(nn.Module):
-    def __init__(self, num_feat, num_grow_ch=32):
-        super(RRDB, self).__init__()
-        self.conv1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.conv2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.conv3 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.conv4 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.conv5 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.lrelu = nn.LeakyReLU(0.2, inplace=True)
-
-    def forward(self, x):
-        out = self.conv5(self.lrelu(self.conv4(self.lrelu(self.conv3(self.lrelu(self.conv2(self.lrelu(self.conv1(x)))))))))
-        return out * 0.2 + x
-
-
-class RDB(nn.Module):
-    def __init__(self, num_feat, num_grow_ch=32):
-        super(RDB, self).__init__()
-        self.conv1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.conv2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.conv3 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.conv4 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.conv5 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
-        self.lrelu = nn.LeakyReLU(0.2, inplace=True)
-
-    def forward(self, x):
-        x1 = self.conv1(x)
-        x1 = self.lrelu(x1)
-        x1 = self.conv2(x1)
-        x1 = self.lrelu(x1)
-        x1 = self.conv3(x1)
-        x1 = self.lrelu(x1)
-        x1 = self.conv4(x1)
-        x1 = self.lrelu(x1)
-        x1 = self.conv5(x1)
-        return x1 * 0.2 + x
+def get_realesrgan_model_path(local_files_only=False):
+    """Local path of the 4x-UltraSharpV2 weights in the shared HF cache
+    (same handling as the SeedVR2 weights). Downloads on first use unless
+    local_files_only is set."""
+    from huggingface_hub import hf_hub_download
+    return hf_hub_download(repo_id=REAL_ESRGAN_HF_REPO,
+                           filename=REAL_ESRGAN_MODEL_FILE,
+                           local_files_only=local_files_only)
 
 
 class RealESRGANUpscaler:
@@ -129,32 +80,18 @@ class RealESRGANUpscaler:
             if status_cb:
                 status_cb(msg)
 
-        state_dict = torch.load(self.model_path, map_location=self.device)
-        if 'params_ema' in state_dict:
-            state_dict = state_dict['params_ema']
+        # spandrel auto-detects the architecture from the checkpoint
+        # (RRDB variants, SwinIR, HAT, DAT, ...) and loads it on our device.
+        from spandrel import ModelLoader
 
-        # Count the number of RRDB blocks
-        block_count = 0
-        for key in state_dict.keys():
-            if key.startswith('body.'):
-                parts = key.split('.')
-                if len(parts) > 2 and parts[1].isdigit():
-                    block_num = int(parts[1])
-                    block_count = max(block_count, block_num + 1)
-
-        _status(f"Detected {block_count} blocks in model")
-
-        model = RRDBNet(
-            num_in_ch=3,
-            num_out_ch=3,
-            num_feat=64,
-            num_block=block_count,
-            num_grow_ch=32
-        )
-
-        model.load_state_dict(state_dict)
+        _status("Loading model...")
+        descriptor = ModelLoader(self.device).load_from_file(self.model_path)
+        model = descriptor.model
         model.eval()
-        self.model = model.to(self.device)
+        for p in model.parameters():
+            p.requires_grad = False
+        self.model = model
+        _status(f"Loaded {type(descriptor.architecture).__name__}")
         return self.model
 
     def process_tile(self, tile, scale):
@@ -566,8 +503,8 @@ def run(params, progress_cb=None, stop_check=None):
       folder: directory to scan (required).
       recursive: include subfolders (default False).
       model: "realesrgan" (default) or "seedvr2".
-      model_path: RealESRGAN weights path (default: <app>/models/
-          RealESRGAN_x4plus_anime_6B.pth).
+      model_path: RealESRGAN weights path (default: 4x-UltraSharpV2.pth
+          in the shared HF cache).
       scale_factor: fixed scale (default 4.0, the GUI spin default).
       min_size: >0 switches to auto mode - smallest 0.1 step that brings
           the longest side to at least min_size (GUI resolution spin).
@@ -635,15 +572,31 @@ def run(params, progress_cb=None, stop_check=None):
                 progress_cb(summary["processed"] + summary["errors"], total)
         return summary
 
+    # Resolve the compute device. Priority: explicit --device-id (cuda:<n>),
+    # then explicit --device (cuda|cpu), then the persisted GUI selection
+    # (default GPU 0) - matching the tagger and the GUI upscaler.
+    device_id = params.get("device_id")
+    device = params.get("device")
+    if device_id is not None:
+        device = settings.to_torch_device(device_id)
+    elif device is None:
+        device = settings.to_torch_device(settings.get_selected_device_id())
     if model == "realesrgan":
-        model_path = params.get("model_path") or str(REAL_ESRGAN_MODEL_PATH)
-        if not os.path.exists(model_path):
-            raise FileNotFoundError(
-                f"RealESRGAN weights not found at {model_path}. "
-                "Download the model first (cli.py download-model).")
+        model_path = params.get("model_path")
+        if model_path:
+            if not os.path.exists(model_path):
+                raise FileNotFoundError(
+                    f"RealESRGAN weights not found at {model_path}.")
+        else:
+            try:
+                model_path = get_realesrgan_model_path(local_files_only=True)
+            except FileNotFoundError as e:
+                raise FileNotFoundError(
+                    "RealESRGAN weights not found in the HF cache. "
+                    "Download the model first (cli.py download-model).") from e
         upscaler = RealESRGANUpscaler(
             model_path,
-            device=params.get("device"),
+            device=device,
             scale_factor=params.get("scale_factor", 4.0),
             min_size=params.get("min_size", 0),
         )
@@ -682,7 +635,7 @@ def run(params, progress_cb=None, stop_check=None):
     elif model == "seedvr2":
         upscaler = SeedVR2Upscaler(
             scale_factor=params.get("scale_factor", 4.0),
-            device=params.get("device") or "cpu",
+            device=device,
             seed=params.get("seed", -1),
             color_correction=params.get("color_correction", "wavelet"),
             tile_vae=params.get("tile_vae", True),
@@ -734,8 +687,8 @@ def download_model(model="realesrgan", dest_path=None, status_cb=None,
     """Download a model's weights (this blocks; running it off the calling
     thread is the caller's concern). Returns True on success.
 
-    RealESRGAN: single .pth via HTTP into a .part file, renamed into place
-    so an interrupted download never leaves a partial file behind.
+    RealESRGAN: single .pth via huggingface_hub into the shared HF cache
+    (or into --dest via local_dir).
     SeedVR2: both weights via huggingface_hub into its cache.
     """
     def _status(msg):
@@ -758,36 +711,16 @@ def download_model(model="realesrgan", dest_path=None, status_cb=None,
                 return False
         return True
 
-    # RealESRGAN
-    import requests
-    dest_path = dest_path or str(REAL_ESRGAN_MODEL_PATH)
-    part_path = dest_path + '.part'
+    # RealESRGAN (4x-UltraSharpV2)
+    from huggingface_hub import hf_hub_download
+    if stop_check is not None and stop_check():
+        return False
+    _status(f"Downloading {REAL_ESRGAN_MODEL_FILE}...")
     try:
-        response = requests.get(REAL_ESRGAN_MODEL_URL, stream=True)
-        response.raise_for_status()
-        total = int(response.headers.get('content-length', 0))
-        downloaded = 0
-        with open(part_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=1 << 20):
-                if stop_check is not None and stop_check():
-                    break
-                if chunk:
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                if total:
-                    _status(f"Downloading model... {downloaded >> 20} / "
-                            f"{total >> 20} MB")
-        if stop_check is not None and stop_check():
-            return False
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        os.replace(part_path, dest_path)
-        return True
+        hf_hub_download(repo_id=REAL_ESRGAN_HF_REPO,
+                        filename=REAL_ESRGAN_MODEL_FILE,
+                        local_dir=dest_path)
     except Exception as e:
         _status(f"Download failed: {e}")
         return False
-    finally:
-        if os.path.exists(part_path):
-            try:
-                os.remove(part_path)
-            except OSError:
-                pass
+    return True

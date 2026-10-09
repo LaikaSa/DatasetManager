@@ -1,4 +1,4 @@
-﻿"""
+"""
 Pure-Python core of the caption generator (no Qt imports; callable from the
 CLI). Both caption modes live here:
 

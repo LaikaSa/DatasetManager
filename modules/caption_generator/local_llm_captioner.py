@@ -50,7 +50,6 @@ from PIL import Image
 
 from modules import config as app_config
 from modules.logger import setup_logger
-from modules.utils import IMAGE_EXTENSIONS
 
 logger = setup_logger()
 
@@ -69,23 +68,6 @@ _REASONING_TAG_PATTERN = re.compile(
     r"<\s*(think|thinking|reasoning|reflection)\s*>.*?<\s*/\s*\1\s*>",
     re.IGNORECASE | re.DOTALL,
 )
-
-
-def _extract_system_prompt(data):
-    """Pull the system-prompt string out of parsed JSON.
-
-    Accepts a bare JSON string ("..."), or an object with the text under one
-    of the common keys. Returns None when nothing usable is found so the
-    caller can fall back to DEFAULT_SYSTEM_PROMPT.
-    """
-    if isinstance(data, str):
-        return data.strip() or None
-    if isinstance(data, dict):
-        for key in ("system_prompt", "system", "prompt", "content"):
-            value = data.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-    return None
 
 
 class LocalLLMCancelled(Exception):

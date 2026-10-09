@@ -22,17 +22,12 @@ Reference implementation:
 """
 
 import os
-import math
-import random
 import datetime
 
 # Reduce CUDA memory fragmentation ("reserved but unallocated") - must be set
 # before the first CUDA allocation, hence at import time of this module.
 os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
-import numpy as np
-import torch
-from PIL import Image
 from PySide6.QtCore import QThread, Signal
 
 from modules.logger import setup_logger

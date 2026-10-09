@@ -1,4 +1,4 @@
-﻿"""DatasetManager CLI â€” minimal, agent-friendly entry point.
+"""DatasetManager CLI â€” minimal, agent-friendly entry point.
 
 Every GUI feature is drivable here without Qt: each subcommand builds a
 params dict and calls its feature engine's run() (see engine contract:
@@ -48,6 +48,20 @@ def _ext_set(extra):
         if e not in exts:
             exts.append(e)
     return tuple(exts)
+
+def _split_csv(values):
+    """Split comma-separated tag values into individual tags.
+
+    --tags/--new-tags accept both space-separated (nargs='*') and
+    comma-separated values, matching the GUI's comma-separated input.
+    """
+    out = []
+    for v in values or ():
+        for t in v.split(','):
+            t = t.strip()
+            if t:
+                out.append(t)
+    return out
 
 
 class CancelToken:
@@ -160,6 +174,8 @@ def print_introspection():
             ],
         })
     print(json.dumps({"commands": out}, ensure_ascii=False, indent=2))
+
+
 def build_parser():
     parser = argparse.ArgumentParser(
         prog="cli.py", parents=[GLOBALS],
@@ -340,7 +356,7 @@ def _flags_convert(p):
                    help="top-level only (icc_fix; overrides its recursive default)")
     p.add_argument("--no-backup", action="store_true",
                    help="skip .bak backups (icc_fix)")
-    p.add_argument("--dry-run", action="store_true", help="icc_fix only")
+    p.add_argument("--dry-run", action="store_true", help="report only, write nothing")
     p.add_argument("--use-parallel", action="store_true", help="convert only")
     p.add_argument("--ext", nargs="*", default=None,
                    help="extra file extensions to scan")
@@ -391,9 +407,9 @@ def _run_tags(args, engine, cli):
     params = {"folder": args.folder, "op": args.op, "recursive": args.recursive,
               "dry_run": args.dry_run, "backup": args.backup}
     if args.tags:
-        params["tags"] = args.tags
+        params["tags"] = _split_csv(args.tags)
     if args.new_tags:
-        params["new_tags"] = args.new_tags
+        params["new_tags"] = _split_csv(args.new_tags)
     if args.position:
         positions = []
         for pos in args.position:
@@ -454,7 +470,7 @@ def _flags_caption(p):
                    default="tagger")
     p.add_argument("--model-name", default=None,
                    help="tagger model (wd-eva02-large-tagger-v3 | "
-                        "wd-swinv2-tagger-v3 | wd-convnext-tagger-v3); "
+                        "wd-swinv2-tagger-v3); "
                         "default wd-eva02-large-tagger-v3")
     p.add_argument("--device-id", type=int, default=None,
                    help="CUDA device index (tagger)")
@@ -574,8 +590,8 @@ def _flags_upscale(p):
     p.add_argument("--model", choices=["realesrgan", "seedvr2"],
                    default="realesrgan")
     p.add_argument("--model-path", default=None,
-                   help="RealESRGAN weights path (default <app>/models/"
-                        "RealESRGAN_x4plus_anime_6B.pth)")
+                   help="RealESRGAN weights path (default: "
+                        "4x-UltraSharpV2.pth in the shared HF cache)")
     p.add_argument("--scale-factor", type=float, default=4.0,
                    help="fixed scale (default 4.0, the GUI spin default)")
     p.add_argument("--min-size", type=int, default=0,
@@ -583,6 +599,9 @@ def _flags_upscale(p):
                         "side to at least this (GUI resolution spin)")
     p.add_argument("--device", default=None,
                    help="cuda|cpu (default: auto-detect)")
+    p.add_argument("--device-id", type=int, default=None,
+                   help="CUDA device index, e.g. 1 for the 2nd GPU "
+                        "(overrides --device; default: GUI selection)")
     p.add_argument("--seed", type=int, default=-1,
                    help="SeedVR2 seed; -1 = random per image (GUI default)")
     p.add_argument("--color-correction", default="wavelet",
@@ -613,6 +632,8 @@ def _run_upscale(args, engine, cli):
         params["model_path"] = args.model_path
     if args.device:
         params["device"] = args.device
+    if args.device_id is not None:
+        params["device_id"] = args.device_id
     if args.ext:
         params["extensions"] = _ext_set(args.ext)
     return cli.summary(engine.run(params, cli.progress_cb, cli.stop_check))
@@ -625,7 +646,8 @@ def _flags_download_model(p):
     p.add_argument("--model", choices=["realesrgan", "seedvr2"],
                    default="realesrgan")
     p.add_argument("--dest", default=None,
-                   help="RealESRGAN weights destination path")
+                   help="directory to place the RealESRGAN weights in "
+                        "instead of the HF cache")
 
 
 def _run_download_model(args, engine, cli):

@@ -1,7 +1,5 @@
 from multiprocessing import Pool
 from pathlib import Path
-from PySide6.QtGui import QImage, QPixmap
-from PySide6.QtCore import Qt
 import os
 
 # Cap math-library threads *before* numpy loads: workers only do
@@ -13,9 +11,12 @@ for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS",
 
 import numpy as np
 from PIL import Image
-import time  # Add this import
+import time
 
 from modules.utils import IMAGE_EXTENSIONS
+from modules.logger import setup_logger
+
+logger = setup_logger()
 
 def process_single_image(args):
     """Process a single image and its tags (runs in worker process)"""
@@ -55,7 +56,7 @@ def process_single_image(args):
             'tags': tags
         }
     except Exception as e:
-        print(f"Error processing {image_path}: {e}")
+        logger.error("Error processing %s: %s", image_path, e)
         return None
 
 class ParallelLoader:
@@ -98,7 +99,7 @@ class ParallelLoader:
     def load_images(self, directory, recursive=False):
         """Load images and tags in parallel"""
         try:
-            print("\nStarting parallel loading process...")
+            logger.debug("Starting parallel loading process...")
             self.start_pool()
             
             # Get all image files
@@ -110,8 +111,8 @@ class ParallelLoader:
                 if p.suffix.lower() in valid_extensions
             ]
             file_scan_end = time.time()
-            print(f"File scanning time: {file_scan_end - file_scan_start:.2f} seconds")
-            print(f"Found {len(image_paths)} images")
+            logger.debug("File scanning time: %.2f seconds", file_scan_end - file_scan_start)
+            logger.info("Found %d images", len(image_paths))
             
             # Prepare arguments
             args = [(path, self.thumbnail_size) for path in image_paths]
@@ -122,7 +123,7 @@ class ParallelLoader:
             chunksize = max(1, len(args) // (self.pool._processes * 4))
             results = self.pool.map(process_single_image, args, chunksize=chunksize)
             parallel_end = time.time()
-            print(f"Parallel processing time: {parallel_end - parallel_start:.2f} seconds")
+            logger.debug("Parallel processing time: %.2f seconds", parallel_end - parallel_start)
             
             # Convert results to QPixmap in main thread
             conversion_start = time.time()
@@ -146,13 +147,11 @@ class ParallelLoader:
                 successful += 1
 
             conversion_end = time.time()
-            print(f"\nParallel Summary:")
-            print(f"Successful conversions: {successful}")
-            print(f"Failed conversions: {failed}")
-            print(f"Parallel time: {conversion_end - conversion_start:.2f} seconds")
+            logger.debug("Parallel summary: %d successful, %d failed, %.2f seconds",
+                         successful, failed, conversion_end - conversion_start)
 
             return processed_images
 
         except Exception as e:
-            print(f"Error in parallel loading: {e}")
+            logger.error("Error in parallel loading: %s", e)
             return []

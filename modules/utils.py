@@ -11,11 +11,6 @@ import sys
 IMAGE_EXTENSIONS = ('.png', '.jpg', '.jpeg', '.bmp')
 
 
-def is_image_file(path, extensions=IMAGE_EXTENSIONS):
-    """True when path has one of the given image extensions."""
-    return path.lower().endswith(extensions)
-
-
 def open_in_folder(path):
     """Open the folder containing path in Explorer with the file
     highlighted and scrolled into view (Windows shell API)."""

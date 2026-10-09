@@ -103,7 +103,7 @@ class FullImageView(QWidget):
         open_action = menu.addAction("Open in Folder")
         action = menu.exec(self.image_label.mapToGlobal(pos))
         if action == open_action:
-            _open_in_explorer_selected(self.current_image)
+            open_in_folder(self.current_image)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)

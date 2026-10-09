@@ -53,7 +53,7 @@ def run(params, progress_cb=None, stop_check=None):
             GUI passes the app-wide cog setting here).
         backup: copy each modified file to <name>.ext.bak before
             overwriting ("icc_fix" only).
-        dry_run: scan and report only, write nothing ("icc_fix" only).
+        dry_run: scan and report only, write nothing.
         extensions: optional extra extensions to scan for (the CLI's
             --ext equivalent), added to the operation's own default set.
     progress_cb(current: int, total: int, message: str = "") - called on
@@ -73,6 +73,7 @@ def run(params, progress_cb=None, stop_check=None):
             params["target_format"],
             recursive=params.get("recursive", False),
             use_parallel=params.get("use_parallel", False),
+            dry_run=params.get("dry_run", False),
             progress_cb=progress_cb,
             stop_check=stop_check,
             extensions=params.get("extensions"),
@@ -130,8 +131,11 @@ class ImageConverter:
             img.save(out_path, **save_kwargs)
         return out_path
 
-    def convert_folder(self, folder_path, target_format, recursive=False, use_parallel=False, progress_cb=None, stop_check=None, extensions=None):
+    def convert_folder(self, folder_path, target_format, recursive=False, use_parallel=False, dry_run=False, progress_cb=None, stop_check=None, extensions=None):
         """Convert all images in a folder to the target format.
+
+        dry_run reports what would be written (including which outputs
+        already exist) without touching anything.
 
         Returns a summary dict (see run()).
         """
@@ -168,7 +172,7 @@ class ImageConverter:
                     progress_cb(processed_files, total_files)
 
             # Convert files
-            if use_parallel:
+            if use_parallel and not dry_run:
                 # Submit in chunks so a Stop is honored between chunks instead
                 # of after the entire (possibly huge) backlog is queued.
                 chunk = 64
@@ -205,6 +209,16 @@ class ImageConverter:
                         summary["stopped"] = True
                         break
                     file_path = os.path.join(root, file)
+                    if dry_run:
+                        out_path = os.path.splitext(file_path)[0] + '.' + target_format
+                        reason = (f"would skip: {out_path} exists"
+                                  if os.path.exists(out_path)
+                                  else f"would convert to .{target_format}")
+                        summary["items"].append(
+                            {"path": file_path, "action": "dry-run", "reason": reason}
+                        )
+                        update_progress()
+                        continue
                     try:
                         self._convert_image(file_path, target_format)
                         summary["items"].append(

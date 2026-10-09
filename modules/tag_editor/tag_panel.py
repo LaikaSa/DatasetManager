@@ -104,19 +104,6 @@ class TagList(QScrollArea):
     def get_checked_tags(self) -> set[str]:
         return {tag for tag, cb in self.tag_checkboxes.items() if cb.isChecked()}
 
-    def filter_visible_tags(self, search_text):
-        search_terms = search_text.lower().split(',')
-        visible_boxes = []
-        
-        for tag, checkbox in self.tag_checkboxes.items():
-            visible = not search_text or any(term.strip() in tag.lower() 
-                                           for term in search_terms)
-            checkbox.setVisible(visible)
-            if visible:
-                visible_boxes.append(checkbox)
-
-        self.reflow_checkboxes(visible_boxes)
-
     def reflow_checkboxes(self, visible_boxes):
         self._visible_boxes = list(visible_boxes)
         columns = self._column_count = self._target_columns()
@@ -499,15 +486,6 @@ class TagPanel(QWidget):
     def update_counter(self, visible: int, total: int):
         self.filter_tab.update_counter(visible, total)
 
-    def get_current_filter(self):
-        """Get current filter settings"""
-        tags = self.tag_list.get_checked_tags()
-        combine_logic = "AND" if self.filter_tab.and_cb.isChecked() else "OR"
-        filter_logic = "POSITIVE" if self.filter_tab.positive_cb.isChecked() else "NEGATIVE"
-        return tags, combine_logic, filter_logic
-
-    def clear_status(self):
-        self.action_tab.clear_status()
 
     def clear(self):
         """Clear all data in the panel"""

@@ -179,8 +179,8 @@ cli.py convert <folder> --operation convert|icc_fix
                  [--no-backup] [--dry-run] [--use-parallel] [--ext ...]
 ```
 - `--operation icc_fix`: strips embedded ICC profiles and normalizes
-  non-RGB/RGBA to RGB. Creates `.bak` backups unless `--no-backup` (deleted
-  after a verified write).
+  non-RGB/RGBA to RGB. Creates a `.bak` backup unless `--no-backup`
+  (kept for your verification; delete them once you're happy).
 - `--operation convert`: re-encodes to `--target-format`
   (`png|jpeg|jpg|bmp|webp`). **Non-destructive**: writes the converted file
   next to the original (same basename, new extension) and leaves the original
@@ -256,7 +256,9 @@ cli.py upscale <folder> [--model realesrgan|seedvr2]
   pick the smallest 0.1 step that brings the longest side to â‰¥ PX. Images
   whose longest side is **already â‰¥ PX are `skipped`** (reason
   `already >= min_size`) â€” re-runs do not re-upscale them.
-- RealESRGAN weights default to `<repo>/models/RealESRGAN_x4plus_anime_6B.pth`.
+- RealESRGAN weights live in the shared HF cache (repo
+  `Kim2091/UltraSharpV2`; DAT2 architecture, auto-detected and loaded via
+  spandrel).
   If missing, a real run exits `1` with a clear "download the model first"
   message. Run `download-model` first.
 - Default: output goes to an `upscaled/` subfolder next to each source;
@@ -278,8 +280,8 @@ cli.py recycle <path> [<path> ...] [--dry-run]
 ```
 cli.py download-model [--model realesrgan|seedvr2] [--dest PATH]
 ```
-- Downloads weights to `<repo>/models/` (or `--dest`). Large (RealESRGAN ~1.7 GB,
-  SeedVR2 several GB). Emits `model_download_ok` on success.
+- Downloads weights to the shared HF cache (or the `--dest` directory).
+  Large (4x-UltraSharpV2 ~140 MB, SeedVR2 several GB). Emits `model_download_ok` on success.
 
 ### `config` â€” read/write `config.yaml`
 ```

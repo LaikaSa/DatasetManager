@@ -5,7 +5,6 @@ input selector in input_widget.py; this module is the tab UI only.
 """
 import os
 
-import torch
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout,
                               QPushButton, QLabel, QCheckBox,
                               QComboBox, QSpinBox, QDoubleSpinBox,
@@ -74,7 +73,7 @@ class UpscalerTab(QWidget):
         model_layout = QHBoxLayout()
         model_layout.addWidget(QLabel("Model:"))
         self.model_combo = QComboBox()
-        self.model_combo.addItem("Default (RealESRGAN anime 6B)", "realesrgan")
+        self.model_combo.addItem("Default (4x-UltraSharpV2)", "realesrgan")
         self.model_combo.addItem("SeedVR2 (3B fp16)", "seedvr2")
         # NOTE: connected after seedvr2_options exists (addItem emits indexChanged)
         model_layout.addWidget(self.model_combo)
@@ -199,7 +198,8 @@ class UpscalerTab(QWidget):
     def refresh_model_row(self):
         """Recompute the ready-state of every model and update the UI."""
         self.model_ready = {}
-        self.model_ready["realesrgan"] = os.path.exists(self.model_path)
+        self.model_ready["realesrgan"] = (self.model_path is not None
+                                          and os.path.exists(self.model_path))
         self.model_ready["seedvr2"] = are_seedvr2_models_downloaded()
 
         ready = self.model_ready.get(self.selected_model(), False)
@@ -208,9 +208,11 @@ class UpscalerTab(QWidget):
         self.check_input()
 
     def check_model(self):
-        root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        model_dir = os.path.join(root_dir, "models")
-        self.model_path = os.path.join(model_dir, "RealESRGAN_x4plus_anime_6B.pth")
+        from modules.Upscaler.engine import get_realesrgan_model_path
+        try:
+            self.model_path = get_realesrgan_model_path(local_files_only=True)
+        except FileNotFoundError:
+            self.model_path = None
         self.model_ready = {}
         self._downloading = False
         self.refresh_model_row()
@@ -231,22 +233,22 @@ class UpscalerTab(QWidget):
             self.seedvr2_download.start()
             return
 
-        # Default RealESRGAN model (small, single file) - downloaded in a
+        # Default 4x-UltraSharpV2 model (single file) - downloaded in a
         # worker thread so the GUI stays responsive during the transfer.
         self._downloading = True
         self.download_btn.setEnabled(False)
         self.model_status.setText("Downloading model...")
-        url = "https://github.com/xinntao/Real-ESRGAN/releases/download/v0.2.2.4/RealESRGAN_x4plus_anime_6B.pth"
-        os.makedirs(os.path.dirname(self.model_path), exist_ok=True)
-        self.download_worker = ModelDownloadWorker(url, self.model_path)
+        self.download_worker = ModelDownloadWorker()
         self.download_worker.status.connect(self.model_status.setText)
         self.download_worker.finished_ok.connect(self._realesrgan_download_done)
         self.download_worker.start()
 
     def _realesrgan_download_done(self, ok):
         self._downloading = False
-        self.refresh_model_row()
-        if not ok:
+        if ok:
+            self.check_model()
+        else:
+            self.refresh_model_row()
             self.model_status.setText("Download failed")
             self.download_btn.setEnabled(True)
 
